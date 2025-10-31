@@ -140,7 +140,7 @@ function startImmediateOperations() {
                 }
             }
         });
-    }, 60000); // 1 minute delay
+    }, 160000); // 1 minute delay
 }
 
 // Load user configuration from file
