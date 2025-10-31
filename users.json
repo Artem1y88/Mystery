@@ -158,25 +158,5 @@
     "baseInterval": "31",
     "randomScale1": "3",
     "randomScale2": "19"
-  },
-  {
-    "userId": "136638",
-    "refreshToken": "eyJhbGciOiJIUzM4NCIsInR5cCI6IkpXVCJ9.eyJkYXRhIjoib3BIR093bEVpWFN1NkJtODZFMVhYUT09Oms0QTVHQ3J1ejlSZ3lEbXpsaG13a0o2V1Q0MUhaVFgwZ1YxQ1Z0ekx2RklPNW5oUzdBcTFObFdXdUZRa0RsVWFzaDZxM2pKR0tReUY3VFhSTHRtTXRaN3NTWk9MYk5ickMyNmFiUE1QWmNrOFlhWEtHdXJmZ1RlWU9ZaU1XZFJpd0kyazdCZEcvdG5TZWZJenJjNjFoc2hhWXZycWpNVzRrQjRpVU1xZDlpenFycllpZXdkTXIzNGsycjRpMHIrWGtmWXdQRDdvLzFXaGlES1h6TlhxNEE9PSIsInZlcnNpb24iOjEsImlhdCI6MTc0OTc5OTczNywiaXNzIjoiZXBpY3MuZ2cifQ.IaQjiCcUlMBiN_-DIKrXv6mdCWBLem4O4jdNCyEJy6g1mDXBZ9l6g_kTqcZ2fCnN",
-    "userClaimAchivID": "136638",
-    "dayStart": "7:01",
-    "dayEnd": "21:03",
-    "baseInterval": "30",
-    "randomScale1": "5",
-    "randomScale2": "21"
-  },
-  {
-    "userId": "143182",
-    "refreshToken": "eyJhbGciOiJIUzM4NCIsInR5cCI6IkpXVCJ9.eyJkYXRhIjoialNjSnpqTUNOZWl4VFMvcG9RMWdGUT09OmpIcTlGUHREYXlJUHBjS0wzT2RtVkFJSk5xUTVZS21TN3o5ME9ER1RpL2NBNnI4cVc0cG5YZ0NXU3ZaaW8rUG53NWZWQndSVjRQcEJyZkdWMjd6V2VzZGp5QkxEVll1d3ZVSWlrNzN0NHhnNC9RTmJ4NFNESDNwV3pXQ0w2VnZROG9xaVREOXlLQ0Z6bk1EelJ0UXUwS0M3R3V5aDh5bEZCc1BHWU0yMTVpOWJ0V2RuVDV5bjVHcFIxREE1Mi9sREtBVFYrRy9mUHhBSEhWRXNhUFlkT2c9PSIsInZlcnNpb24iOjEsImlhdCI6MTc0OTc5OTc2NCwiaXNzIjoiZXBpY3MuZ2cifQ.kNGOJMDxCceZiLUFdQb95RmZkoO54TLoztAaq-MIxTKEqSrmEgS8rFikmuuu7JOE",
-    "userClaimAchivID": "143182",
-    "dayStart": "23:04",
-    "dayEnd": "14:21",
-    "baseInterval": "32",
-    "randomScale1": "1",
-    "randomScale2": "11"
   }
 ]
