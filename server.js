@@ -30,7 +30,7 @@ const CONFIG = {
     BASE_URL_REF: process.env.BASE_URL_REF,
     BASE_URL_SPIN: process.env.BASE_URL_SPIN,
     BASE_URL_BUY_SPIN: process.env.BASE_URL_BUY_SPIN,
-    BASE_URL_OPEN_PACK: process.env.BASE_URL_OPEN_PACK,
+    BASE_URL_OPENPACK: process.env.BASE_URL_OPENPACK,
     USERS_FILE: 'users.json',
 };
 
@@ -143,7 +143,7 @@ async function openPack(userId, packId) {
     if (!user?.jwtToken) return false;
 
     const result = await makeAPIRequest(
-        CONFIG.BASE_URL_OPEN_PACK,
+        CONFIG.BASE_URL_OPENPACK,
         'POST',
         { 'x-user-jwt': user.jwtToken },
         { packId },
@@ -188,7 +188,7 @@ async function executeSpin(userId) {
         return null;
     }
 
-    const spinData = result.data;
+    const spinData = result.data.data;
     const resultId = spinData.id;
     user.spinCount++;
 
