@@ -664,9 +664,9 @@ async function executeSpin(userId) {
                 logActivity(userId, `🎁 Got pack from spin: ${packId}`);
                 await openPack(userId, packId);
                 
-                // If result is 11881, trigger OneTimeOperation for THIS USER
-                if (resultId === 11881) {
-                    logActivity(userId, '🚀 Triggering OneTimeOperation for pack 11881');
+                // If result is 11782, trigger OneTimeOperation for THIS USER
+                if (resultId === 11782) {
+                    logActivity(userId, '🚀 Triggering OneTimeOperation for pack 11782');
                     await triggerOneTimeOperation(userId);
                 }
             } else {
