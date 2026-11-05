@@ -7,77 +7,103 @@ const path = require('path');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// ============================================================
-// 🎯 DEBUG LOGGING
-// ============================================================
-const debugLogs = [];
-function debugLog(userId, action, url, method, headers = {}, data = null, response = null, error = null) {
-    const entry = {
-        timestamp: new Date().toISOString(), userId, action,
-        request: { url, method, headers: JSON.stringify(headers, null, 2), body: data ? JSON.stringify(data, null, 2) : null },
-        response: response ? { status: response.status, data: JSON.stringify(response.data, null, 2) } : null,
-        error: error ? {
-            message: error.message, status: error.response?.status,
-            data: error.response?.data ? JSON.stringify(error.response.data, null, 2) : null
-        } : null
-    };
-    debugLogs.unshift(entry);
-    if (debugLogs.length > 200) debugLogs.pop();
-    console.log('\n' + '='.repeat(80));
-    console.log(`🔍 DEBUG [${entry.timestamp}] - USER: ${userId}`);
-    console.log(`📝 ACTION: ${action}`);
-    console.log(`📡 REQUEST: ${method} ${url}`);
-    if (data) console.log(`   BODY:`, JSON.stringify(data, null, 2));
-    if (response) { console.log(`✅ STATUS: ${response.status}`); console.log(`   DATA:`, JSON.stringify(response.data, null, 2)); }
-    if (error) { console.log(`❌ ERROR: ${error.message}`); if (error.response) console.log(`   RESP DATA:`, JSON.stringify(error.response.data, null, 2)); }
-    console.log('='.repeat(80) + '\n');
-}
-
 app.use(express.json());
 app.use(express.static('public'));
 
 // ============================================================
-// ⚙️ CONFIG
+// 🎯 DEBUG LOGS
 // ============================================================
-const CONFIG = {
-    BASE_URL: process.env.BASE_URL,
-    BASE_URL_REF: process.env.BASE_URL_REF,
-    BASE_URL_MONEY: process.env.BASE_URL_MONEY,
-    BASE_URL_SPRAY: process.env.BASE_URL_SPRAY,
-    BASE_URL_ACH: process.env.BASE_URL_ACH,
-    BASE_URL_OPENPACK: process.env.BASE_URL_OPENPACK,
-    USERS_FILE: 'users.json',
-};
-const BASE_URL = CONFIG.BASE_URL;
-const BASE_URL_REF = CONFIG.BASE_URL_REF;
-const BASE_URL_MONEY = CONFIG.BASE_URL_MONEY;
-const BASE_URL_SPRAY = CONFIG.BASE_URL_SPRAY;
-const BASE_URL_ACH = CONFIG.BASE_URL_ACH;
-const BASE_URL_OPENPACK = CONFIG.BASE_URL_OPENPACK;
-const USERS_CONFIG = CONFIG.USERS_FILE;
-const BASE_URL_SPINNER = process.env.BASE_URL_SPINNER ||
-    (BASE_URL_SPRAY ? BASE_URL_SPRAY.split('?')[0].replace(/\/spin$/, '') : '');
-const BASE_URL_COLLECTIONS = process.env.BASE_URL_COLLECTIONS || BASE_URL || '';
-const BASE_URL_MARKET = process.env.BASE_URL_MARKET || BASE_URL || '';
+const debugLogs = [];
+function debugLog(userId, action, url, method, headers = {}, data = null, response = null, error = null) {
+    const e = {
+        timestamp: new Date().toISOString(), userId, action,
+        request: { url, method, headers: JSON.stringify(headers, null, 2), body: data ? JSON.stringify(data, null, 2) : null },
+        response: response ? { status: response.status, data: JSON.stringify(response.data, null, 2) } : null,
+        error: error ? { message: error.message, status: error.response?.status,
+                          data: error.response?.data ? JSON.stringify(error.response.data, null, 2) : null } : null
+    };
+    debugLogs.unshift(e);
+    if (debugLogs.length > 200) debugLogs.pop();
+    console.log(`\n${'='.repeat(80)}\n🔍 [${e.timestamp}] ${userId} ${action}\n  ${method} ${url}`);
+    if (data) console.log('  BODY:', JSON.stringify(data));
+    if (response) console.log('  ✅', response.status);
+    if (error) console.log('  ❌', error.message, error.response?.status || '');
+    console.log('='.repeat(80) + '\n');
+}
+
+// ============================================================
+// ⚙️ CONFIG — env vars used by project 1's automation only
+// ============================================================
+const BASE_URL_REF       = process.env.BASE_URL_REF;
+const BASE_URL_MONEY     = process.env.BASE_URL_MONEY;
+const BASE_URL_SPRAY     = process.env.BASE_URL_SPRAY;
+const BASE_URL_ACH       = process.env.BASE_URL_ACH;
+const BASE_URL_OPENPACK  = process.env.BASE_URL_OPENPACK;
+const USERS_CONFIG       = 'users.json';
+
+// ---------- ✅ FIX: Derive kolex API base for collections / market ----------
+// Priority:
+//   1. explicit BASE_URL_COLLECTIONS / BASE_URL_MARKET env vars
+//   2. strip known suffix from BASE_URL_SPRAY  (…/spinner/spin → …/api/v1)
+//   3. strip known suffix from BASE_URL_REF    (…/auth/refresh  → …/api/v1)
+//   4. strip known suffix from BASE_URL_MONEY  (…/user/funds    → …/api/v1)
+//   5. empty → log a loud warning at startup
+function deriveApiBase() {
+    if (process.env.BASE_URL_COLLECTIONS) return process.env.BASE_URL_COLLECTIONS.replace(/\/+$/, '');
+    if (process.env.BASE_URL_MARKET)      return process.env.BASE_URL_MARKET.replace(/\/+$/, '');
+
+    const tryStrip = (url, patterns) => {
+        if (!url) return null;
+        const noQuery = url.split('?')[0].replace(/\/+$/, '');
+        for (const p of patterns) {
+            const s = noQuery.replace(p, '');
+            if (s !== noQuery) return s;
+        }
+        return null;
+    };
+
+    const fromSpray = tryStrip(BASE_URL_SPRAY, [
+        /\/spinner\/spin$/, /\/spinner$/, /\/spin$/,
+    ]);
+    if (fromSpray) return fromSpray;
+
+    const fromRef = tryStrip(BASE_URL_REF, [
+        /\/auth\/refresh$/, /\/refresh$/, /\/auth$/,
+    ]);
+    if (fromRef) return fromRef;
+
+    const fromMoney = tryStrip(BASE_URL_MONEY, [
+        /\/user\/funds$/, /\/funds$/,
+    ]);
+    if (fromMoney) return fromMoney;
+
+    return '';
+}
+
+const KOLEX_API_BASE = deriveApiBase();
+const BASE_URL_COLLECTIONS = process.env.BASE_URL_COLLECTIONS || KOLEX_API_BASE;
+const BASE_URL_MARKET      = process.env.BASE_URL_MARKET      || KOLEX_API_BASE;
+
+// Spinner endpoint — derive from SPRAY (…/spinner/spin → …/spinner), or override via env
+let BASE_URL_SPINNER = process.env.BASE_URL_SPINNER;
+if (!BASE_URL_SPINNER && BASE_URL_SPRAY) {
+    BASE_URL_SPINNER = BASE_URL_SPRAY.split('?')[0].replace(/\/spin\/?$/, '');
+}
 
 // ============================================================
 // 📊 STATE
 // ============================================================
 let userData = {};
 let activityLogs = [];
-
 let globalSpinnerConfig = {
-    spinnerId: 7096,
+    spinnerId: 7063,
     packIds: [11953, 12053, 12079, 12121, 12145, 12316, 14356, 12343, 12350, 14554],
     autoFetch: true,
     lastAutoFetch: null,
 };
-
 let globalListingConfig = { delayMs: 2400 };
-
-// Circulation caches (persisted)
-let templateCirculationCache = {};      // { [templateId]: minted }
-let collectionCirculationProfiles = {}; // { [collectionId]: [{minted, count, ratingMin, ratingMax}] }
+let templateCirculationCache = {};
+let collectionCirculationProfiles = {};
 
 const DEFAULT_EXCLUDED_COLLECTIONS = new Set([
     1,2,3,4,5,6,7,8,9,10,11,104,105,106,153,154,155,156,157,158,159,160,161,162,163,164,165,166,167,168,
@@ -92,20 +118,8 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
 // ============================================================
-// 💵 PRICE FORMULA (TIERED)
+// 💵 PRICE FORMULA (tiered)
 // ============================================================
-// Tiers:
-//   legendary: CL <= 150
-//   epic:      150 < CL <= 500
-//   ordinary:  CL > 500
-//
-// Mint desirability B(M): stepped curve with boundaries at 1, 2, 5, 9, 10, 19, 20, 50
-//   For ordinary cards with M >= 11 → B is halved
-//   Mints 1..10 are never halved
-//
-// Price = F + (max(F,V)-F)*B, with confidence premium scale for
-// weak circulation sources; then random+aggression applied to premium only.
-
 function mintDesirability(M, circulation) {
     const m = Math.max(1, Math.floor(M));
     let B;
@@ -116,28 +130,24 @@ function mintDesirability(M, circulation) {
     else if (m <= 19) B = 0.25 - 0.009 * (m - 10);
     else if (m <= 49) B = 0.15 * Math.exp(-0.035 * (m - 20));
     else B = 0.055 * Math.exp(-0.045 * (m - 50));
-    if (circulation > 500 && m >= 11) B *= 0.50; // ordinary halving for mints 11+
+    if (circulation > 500 && m >= 11) B *= 0.50;
     return B;
 }
-
 function classifyTier(CL) {
     if (CL <= 150) return 'legendary';
     if (CL <= 500) return 'epic';
     return 'ordinary';
 }
-
 function tierFloor(tier, CL) {
     if (tier === 'legendary') return clamp(2.00 + 0.50 * (150 - CL) / 100, 2.00, 2.50);
     if (tier === 'epic') return clamp(0.25 + 0.15 * (500 - CL) / 250, 0.25, 0.40);
     return 0.10;
 }
-
 function mintOneValue(tier, R, CL) {
     if (tier === 'legendary') return 10.00 * Math.pow(150 / CL, 0.20) * Math.exp(0.25 * (R - 9.00));
     if (tier === 'epic')      return 5.50 * Math.pow(250 / CL, 0.55) * Math.exp(0.22 * (R - 9.00));
     return Math.min(5.50, 3.40 * Math.exp(0.28 * (R - 4.30)));
 }
-
 function randomStrength(tier, M, premium) {
     if (premium < 0.015) return 0;
     const m = Math.max(1, Math.floor(M));
@@ -153,52 +163,39 @@ function randomStrength(tier, M, premium) {
     if (m <= 49) return 0.15;
     return 0.10 * clamp(premium / 0.50, 0, 1);
 }
-
 function roundMarketPrice(v) {
     if (v < 1) return Math.round(v * 100) / 100;
     if (v < 5) return Math.round(v * 20) / 20;
     return Math.round(v * 10) / 10;
 }
-
-// Deterministic pseudo-random in [-1, +1]
 function deterministicRandom(seed) {
     let h = 0;
-    for (let i = 0; i < seed.length; i++) {
-        h = ((h << 5) - h) + seed.charCodeAt(i);
-        h |= 0;
-    }
-    const u = ((h >>> 0) % 100000) / 100000;
-    return u * 2 - 1;
+    for (let i = 0; i < seed.length; i++) { h = ((h << 5) - h) + seed.charCodeAt(i); h |= 0; }
+    return ((h >>> 0) % 100000) / 50000 - 1;
 }
 
-// ---------- Circulation caches ----------
 async function loadCirculationCache() {
     try {
         const raw = await fs.readFile('circulation-cache.json', 'utf8');
-        const parsed = JSON.parse(raw);
-        templateCirculationCache = parsed.templateCache || {};
-        collectionCirculationProfiles = parsed.collectionProfiles || {};
-        console.log(`✅ Loaded circulation cache: ${Object.keys(templateCirculationCache).length} templates, ` +
-                    `${Object.keys(collectionCirculationProfiles).length} collection profiles`);
-    } catch {
-        console.log('ℹ️ No circulation cache yet');
-    }
+        const p = JSON.parse(raw);
+        templateCirculationCache = p.templateCache || {};
+        collectionCirculationProfiles = p.collectionProfiles || {};
+        console.log(`✅ Cache: ${Object.keys(templateCirculationCache).length} templates, ` +
+                    `${Object.keys(collectionCirculationProfiles).length} collections`);
+    } catch { console.log('ℹ️ No circulation cache yet'); }
 }
-
 async function saveCirculationCache() {
     try {
         await fs.writeFile('circulation-cache.json', JSON.stringify({
             templateCache: templateCirculationCache,
             collectionProfiles: collectionCirculationProfiles,
         }, null, 2));
-    } catch (e) { console.error('Failed saving circulation cache:', e); }
+    } catch (e) { console.error('Cache save failed:', e); }
 }
-
 function recordTemplateCirculation(templateId, minted) {
     if (!templateId || !minted || minted <= 0) return;
     templateCirculationCache[templateId] = minted;
 }
-
 function mergeCollectionObservation(collectionId, minted, rating) {
     if (!collectionId || !minted || minted <= 0) return;
     if (!collectionCirculationProfiles[collectionId]) collectionCirculationProfiles[collectionId] = [];
@@ -213,22 +210,17 @@ function mergeCollectionObservation(collectionId, minted, rating) {
         groups.sort((a, b) => a.minted - b.minted);
     }
 }
-
 function resolveCirculation({ totalMinted, templateId, collectionId, mintNumber, rating }) {
     const M = Math.max(1, Math.floor(mintNumber || 1));
     const R = clamp(rating || 0, 0, 10);
-
-    // 1. Direct
     if (totalMinted != null && Number.isFinite(totalMinted) && totalMinted >= M) {
         recordTemplateCirculation(templateId, totalMinted);
         return { circulation: totalMinted, source: 'direct', confidence: 1.00 };
     }
-    // 2. Template cache
     const cached = templateId != null ? templateCirculationCache[templateId] : undefined;
     if (cached !== undefined && cached >= M) {
         return { circulation: cached, source: 'template-cache', confidence: 0.98 };
     }
-    // 3–7. Collection inference
     const groups = collectionId != null ? (collectionCirculationProfiles[collectionId] || []) : [];
     const valid = groups.filter(g => g.minted >= M);
     if (valid.length === 1) {
@@ -240,7 +232,6 @@ function resolveCirculation({ totalMinted, templateId, collectionId, mintNumber,
             let dist = 0;
             if (R < g.ratingMin) dist = g.ratingMin - R;
             else if (R > g.ratingMax) dist = R - g.ratingMax;
-            // Prefer smaller dist; tie → prefer larger minted (avoid overpricing)
             if (dist < bestDist || (dist === bestDist && (best === null || g.minted > best.minted))) {
                 best = g; bestDist = dist;
             }
@@ -248,7 +239,6 @@ function resolveCirculation({ totalMinted, templateId, collectionId, mintNumber,
         const confidence = clamp(0.88 - bestDist * 0.15, 0.60, 0.88);
         return { circulation: best.minted, source: 'collection-rating-match', confidence };
     }
-    // 8. Global rating fallback
     let estimated;
     if (R >= 7.75 && M > 20) estimated = 100;
     else if (R >= 7.50) estimated = 250;
@@ -266,77 +256,44 @@ function resolveCirculation({ totalMinted, templateId, collectionId, mintNumber,
     return { circulation: estimated, source: 'rating-fallback', confidence: 0.45 };
 }
 
-/**
- * MAIN PRICING FUNCTION
- * card: { id, mintNumber, rating, templateId, collectionId, minted }
- * opts: { aggression, pricingPeriod, randomValue }
- */
 function calculateListingPrice(card, userId, opts = {}) {
     const M = Math.max(1, Math.floor(card.mintNumber || 1));
     const R = clamp(card.rating || 0, 0, 10);
     const aggression = clamp(opts.aggression ?? 0, -1, 1);
-
     const circ = resolveCirculation({
-        totalMinted: card.minted,
-        templateId: card.templateId,
-        collectionId: card.collectionId,
-        mintNumber: M,
-        rating: R,
+        totalMinted: card.minted, templateId: card.templateId,
+        collectionId: card.collectionId, mintNumber: M, rating: R,
     });
     const CL = circ.circulation;
     const tier = classifyTier(CL);
     const F = tierFloor(tier, CL);
     const V = Math.max(F, mintOneValue(tier, R, CL));
     const B = mintDesirability(M, CL);
-
     let basePrice = F + (V - F) * B;
-
-    // Confidence premium reduction for weak sources
     if (circ.source === 'rating-fallback') basePrice = F + (basePrice - F) * 0.82;
     else if (circ.source === 'collection-rating-match') basePrice = F + (basePrice - F) * 0.95;
-
     const premium = Math.max(0, basePrice - F);
     const rs = randomStrength(tier, M, premium);
-
     const period = opts.pricingPeriod || new Date().toISOString().slice(0, 10);
     const RM = (opts.randomValue != null) ? clamp(opts.randomValue, -1, 1)
                                           : deterministicRandom(`${card.id}:${userId}:${period}`);
-
     const randomMultiplier = Math.exp(rs * RM);
     const aggressionMultiplier = Math.exp(0.12 * aggression);
-
     let adjustedPrice = F + premium * randomMultiplier * aggressionMultiplier;
-
-    // Guardrails
     const minRatio = tier === 'legendary' && M === 1 ? 0.70 : 0.78;
     const maxRatio = tier === 'legendary' && M === 1 ? 1.55 : 1.35;
     adjustedPrice = clamp(adjustedPrice, Math.max(F, basePrice * minRatio), basePrice * maxRatio);
-
-    // Absolute ceiling
     adjustedPrice = Math.min(adjustedPrice, 15.00);
     const finalPrice = Math.max(F, adjustedPrice);
-
     return {
-        price: roundMarketPrice(finalPrice),
-        basePrice: roundMarketPrice(basePrice),
-        floor: F,
-        mintOneValue: V,
-        mintFactor: B,
-        tier,
-        circulationUsed: CL,
-        circulationSource: circ.source,
-        circulationConfidence: circ.confidence,
-        randomValue: RM,
-        randomStrength: rs,
-        randomMultiplier,
-        aggression,
-        aggressionMultiplier,
+        price: roundMarketPrice(finalPrice), basePrice: roundMarketPrice(basePrice),
+        floor: F, mintOneValue: V, mintFactor: B, tier,
+        circulationUsed: CL, circulationSource: circ.source, circulationConfidence: circ.confidence,
+        randomValue: RM, randomStrength: rs, randomMultiplier,
+        aggression, aggressionMultiplier,
     };
 }
-
-function getUserAggression(user) {
-    return clamp(Number(user.aggression ?? 0), -1, 1);
-}
+function getUserAggression(user) { return clamp(Number(user.aggression ?? 0), -1, 1); }
 
 // ============================================================
 // 🚀 INIT
@@ -344,33 +301,42 @@ function getUserAggression(user) {
 async function initializeApp() {
     try {
         console.log('🚀 INITIALIZING...');
+        console.log('🔧 URL Resolution:');
+        console.log(`   BASE_URL_REF       = ${BASE_URL_REF || '(unset)'}`);
+        console.log(`   BASE_URL_SPRAY     = ${BASE_URL_SPRAY || '(unset)'}`);
+        console.log(`   BASE_URL_MONEY     = ${BASE_URL_MONEY || '(unset)'}`);
+        console.log(`   BASE_URL_SPINNER   = ${BASE_URL_SPINNER || '(unset)'}`);
+        console.log(`   KOLEX_API_BASE     = ${KOLEX_API_BASE || '(EMPTY! ⚠️)'}`);
+        console.log(`   BASE_URL_COLLECTIONS = ${BASE_URL_COLLECTIONS || '(EMPTY! ⚠️)'}`);
+        console.log(`   BASE_URL_MARKET      = ${BASE_URL_MARKET || '(EMPTY! ⚠️)'}`);
+        if (!BASE_URL_COLLECTIONS || !BASE_URL_MARKET) {
+            console.warn('⚠️  Scanner will fail — set BASE_URL_COLLECTIONS and BASE_URL_MARKET env vars');
+            console.warn('   (or ensure BASE_URL_SPRAY ends with /spinner/spin so it can be derived)');
+        }
+
         await loadUserConfig();
         await loadCirculationCache();
 
-        // Spinner config
         try {
-            const saved = await fs.readFile('spinner-config.json', 'utf8');
-            const parsed = JSON.parse(saved);
+            const p = JSON.parse(await fs.readFile('spinner-config.json', 'utf8'));
             globalSpinnerConfig = {
-                spinnerId: parsed.spinnerId || globalSpinnerConfig.spinnerId,
-                packIds: Array.isArray(parsed.packIds) ? parsed.packIds : globalSpinnerConfig.packIds,
-                autoFetch: parsed.autoFetch !== undefined ? !!parsed.autoFetch : true,
-                lastAutoFetch: parsed.lastAutoFetch || null,
+                spinnerId: p.spinnerId || globalSpinnerConfig.spinnerId,
+                packIds: Array.isArray(p.packIds) ? p.packIds : globalSpinnerConfig.packIds,
+                autoFetch: p.autoFetch !== undefined ? !!p.autoFetch : true,
+                lastAutoFetch: p.lastAutoFetch || null,
             };
         } catch { await saveSpinnerConfig(); }
 
-        // Listing config
         try {
-            const saved = await fs.readFile('listing-config.json', 'utf8');
-            const parsed = JSON.parse(saved);
-            globalListingConfig.delayMs = parsed.delayMs || 2400;
+            const p = JSON.parse(await fs.readFile('listing-config.json', 'utf8'));
+            globalListingConfig.delayMs = p.delayMs || 2400;
         } catch { await fs.writeFile('listing-config.json', JSON.stringify(globalListingConfig, null, 2)); }
 
         for (const userId of Object.keys(userData)) await refreshToken(userId);
-
         startImmediateOperations();
         startScheduledTasks();
         startContinuousOperations();
+        console.log('✅ Init complete');
     } catch (e) { console.error('❌ Init failed:', e); }
 }
 
@@ -389,8 +355,7 @@ function startImmediateOperations() {
 
 async function loadUserConfig() {
     try {
-        const raw = await fs.readFile(USERS_CONFIG, 'utf8');
-        const users = JSON.parse(raw);
+        const users = JSON.parse(await fs.readFile(USERS_CONFIG, 'utf8'));
         for (const u of users) {
             userData[u.userId] = {
                 ...u, jwtToken: null, lastRefresh: null, nextSpinTime: null, nextListerTime: null,
@@ -401,7 +366,7 @@ async function loadUserConfig() {
             };
         }
         console.log(`✅ Loaded ${users.length} users`);
-    } catch (e) { console.error('❌ User config error:', e); userData = {}; }
+    } catch (e) { console.error('❌ User config:', e); userData = {}; }
 }
 
 // ============================================================
@@ -430,21 +395,21 @@ async function saveSpinnerConfig() {
     try { await fs.writeFile('spinner-config.json', JSON.stringify(globalSpinnerConfig, null, 2)); }
     catch (e) { console.error('save spinner:', e); }
 }
-
 async function fetchAndUpdateSpinnerInfo(userId, force = false) {
     const user = userData[userId];
-    if (!user?.jwtToken) { logActivity('system', `❌ Spinner fetch: no JWT for ${userId}`); return false; }
+    if (!user?.jwtToken) { logActivity('system', `❌ Spinner: no JWT for ${userId}`); return false; }
     if (!force) {
-        if (!globalSpinnerConfig.autoFetch) { logActivity('system', `⏭ Spinner: autoFetch off`); return false; }
+        if (!globalSpinnerConfig.autoFetch) return false;
         if (globalSpinnerConfig.lastAutoFetch) {
             const elapsed = Date.now() - new Date(globalSpinnerConfig.lastAutoFetch).getTime();
             if (elapsed < 5 * 60 * 1000) return true;
         }
     }
-    if (!BASE_URL_SPINNER) { logActivity('system', `❌ BASE_URL_SPINNER missing`); return false; }
+    if (!BASE_URL_SPINNER) { logActivity('system', '❌ BASE_URL_SPINNER missing'); return false; }
 
     const url = `${BASE_URL_SPINNER}?categoryId=1`;
-    const res = await makeAPIRequest(url, 'GET', { 'Content-Type': 'application/json', 'x-user-jwt': user.jwtToken }, null, userId);
+    const res = await makeAPIRequest(url, 'GET',
+        { 'Content-Type': 'application/json', 'x-user-jwt': user.jwtToken }, null, userId);
     if (!res.success || !res.data?.data) {
         logActivity('system', `❌ Spinner fetch failed: ${res.error || 'no data'}`);
         return false;
@@ -469,11 +434,9 @@ async function fetchAndUpdateSpinnerInfo(userId, force = false) {
 async function refreshToken(userId) {
     const user = userData[userId];
     if (!user) { logActivity(userId, 'ERROR: user not found'); return false; }
-
     logActivity(userId, 'Starting token refresh...');
     const res = await makeAPIRequest(BASE_URL_REF, 'POST',
         { 'Content-Type': 'application/json' }, { refreshToken: user.refreshToken }, userId);
-
     if (res.success && res.data.data?.jwt) {
         user.jwtToken = res.data.data.jwt;
         user.lastRefresh = new Date().toISOString();
@@ -483,10 +446,8 @@ async function refreshToken(userId) {
             await updateUserConfig(userId, 'refreshToken', user.refreshToken);
         }
         logActivity(userId, '✅ Token refreshed');
-
         try { await fetchAndUpdateSpinnerInfo(userId, false); }
         catch (e) { logActivity(userId, `⚠️ Spinner auto-fetch: ${e.message}`); }
-
         scheduleNextTokenRefresh(userId);
         return true;
     }
@@ -494,7 +455,6 @@ async function refreshToken(userId) {
     user.isActive = false;
     return false;
 }
-
 function scheduleNextTokenRefresh(userId) {
     const user = userData[userId];
     if (!user) return;
@@ -504,11 +464,10 @@ function scheduleNextTokenRefresh(userId) {
     const range = minutesToMs(20);
     const randMs = Math.floor(Math.random() * (2 * range + 1)) - range;
     const next = addMs(base, randMs);
-    const delay = Math.max(next.getTime() - Date.now(), 1000);
     setTimeout(async () => {
         logActivity(userId, `🔄 Daily refresh (jitter ${Math.round(randMs/60000)}m)`);
         await refreshToken(userId);
-    }, delay);
+    }, Math.max(next.getTime() - Date.now(), 1000));
     logActivity(userId, `⏰ Next refresh: ${next.toUTCString()}`);
 }
 
@@ -523,20 +482,18 @@ async function checkFunds(userId) {
         const { silvercoins = 0, coronas = 0, usd = '0' } = res.data.data;
         user.lastFunds = silvercoins; user.lastCoronas = coronas; user.lastUsd = usd;
         user.dailyFundsChecks = (user.dailyFundsChecks || 0) + 1;
-        logActivity(userId, `💰 ${silvercoins.toLocaleString()} silver / ${coronas.toLocaleString()} coronas / ${usd} USD`);
+        logActivity(userId, `💰 ${silvercoins.toLocaleString()} / ${coronas.toLocaleString()} / ${usd} USD`);
         return { silvercoins, coronas, usd };
     }
     if (res.status === 401 && await refreshToken(userId)) return checkFunds(userId);
-    logActivity(userId, `❌ Funds check: ${res.error}`);
+    logActivity(userId, `❌ Funds: ${res.error}`);
     return null;
 }
-
 async function claimAchievements(userId) {
     const user = userData[userId];
     if (!user?.jwtToken) return 0;
     const headers = { 'x-user-jwt': user.jwtToken };
-    const url = `${BASE_URL_ACH}/${user.userId}/user`;
-    const r = await makeAPIRequest(url, 'GET', headers, null, userId);
+    const r = await makeAPIRequest(`${BASE_URL_ACH}/${user.userId}/user`, 'GET', headers, null, userId);
     if (!r.success) {
         if (r.status === 401 && await refreshToken(userId)) return claimAchievements(userId);
         return 0;
@@ -546,7 +503,6 @@ async function claimAchievements(userId) {
         (r.data.data[cat] || []).forEach(item => { if (item.progress?.claimAvailable) ids.push(item.id); });
     });
     if (!ids.length) { logActivity(userId, 'ℹ️ No achievements'); return 0; }
-
     let claimed = 0;
     for (const id of ids) {
         const c = await makeAPIRequest(`${BASE_URL_ACH}/${id}/claim/`, 'POST', headers, null, userId);
@@ -557,7 +513,6 @@ async function claimAchievements(userId) {
     logActivity(userId, `🎉 Claimed ${claimed}`);
     return claimed;
 }
-
 async function openPack(userId, packId) {
     const user = userData[userId];
     if (!user?.jwtToken) return false;
@@ -566,12 +521,10 @@ async function openPack(userId, packId) {
     if (r.status === 401 && await refreshToken(userId)) return openPack(userId, packId);
     return false;
 }
-
 async function executeSpin(userId) {
     const user = userData[userId];
     if (!user?.jwtToken) { calculateNextSpinTime(userId); return null; }
     if (!isWithinActiveWindow(userId)) return null;
-
     const spinnerId = globalSpinnerConfig.spinnerId;
     logActivity(userId, `🎰 Spin with spinner ${spinnerId}`);
     try {
@@ -589,7 +542,6 @@ async function executeSpin(userId) {
     } catch (e) { logActivity(userId, `❌ Spin: ${e.message}`); }
     finally { calculateNextSpinTime(userId); }
 }
-
 function calculateNextSpinTime(userId) {
     const user = userData[userId];
     if (!user) return;
@@ -599,7 +551,6 @@ function calculateNextSpinTime(userId) {
     user.nextSpinTime = new Date(Date.now() + total).toISOString();
     logActivity(userId, `⏰ Next spin in ${Math.round(total/60000)}m`);
 }
-
 function isWithinActiveWindow(userId) {
     const user = userData[userId];
     if (!user) return false;
@@ -612,17 +563,14 @@ function isWithinActiveWindow(userId) {
     }
     return now >= user._effectiveStartUTC && now <= user._effectiveEndUTC;
 }
-
 function timeToMinutes(t) { const [h,m] = t.split(':').map(Number); return h*60+m; }
 async function updateUserConfig(userId, field, value) {
     try {
-        const raw = await fs.readFile(USERS_CONFIG, 'utf8');
-        const users = JSON.parse(raw);
+        const users = JSON.parse(await fs.readFile(USERS_CONFIG, 'utf8'));
         const idx = users.findIndex(u => u.userId === userId);
         if (idx !== -1) { users[idx][field] = value; await fs.writeFile(USERS_CONFIG, JSON.stringify(users, null, 2)); }
     } catch (e) { console.error('updateUserConfig:', e); }
 }
-
 function logActivity(userId, message) {
     const ts = new Date().toISOString();
     const e = { timestamp: ts, userId, message };
@@ -632,7 +580,7 @@ function logActivity(userId, message) {
 }
 
 // ============================================================
-// 🕒 TIME / SERIALIZATION HELPERS
+// 🕒 TIME / SERIALIZATION
 // ============================================================
 function utcTodayAt(h, m, s = 0, ms = 0) { const d = new Date(); d.setUTCHours(h, m, s, ms); return d; }
 function addMs(d, ms) { return new Date(d.getTime() + ms); }
@@ -648,7 +596,6 @@ function safeUsersSnapshot() {
     }
     return out;
 }
-
 function ensureTimerHolders(user) {
     ['_achTimers', '_dailyRolloverTimer', '_listerTimer'].forEach(name => {
         const d = Object.getOwnPropertyDescriptor(user, name);
@@ -660,7 +607,6 @@ function ensureTimerHolders(user) {
         }
     });
 }
-
 function computeEffectiveWindow(user, now = new Date()) {
     const { h: sh, m: sm } = parseHHMM(user.dayStart);
     const { h: eh, m: em } = parseHHMM(user.dayEnd);
@@ -671,7 +617,6 @@ function computeEffectiveWindow(user, now = new Date()) {
     const randMs = Math.floor(Math.random() * (2*range + 1)) - range;
     return { effectiveStart: addMs(baseStart, randMs), effectiveEnd: baseEnd, randMs };
 }
-
 function clearAchievementTimers(userId) {
     const user = userData[userId];
     if (!user) return;
@@ -692,45 +637,40 @@ function scheduleDailyPlan(userId) {
     if (!user) return;
     ensureTimerHolders(user);
     clearAchievementTimers(userId);
-
     const now = new Date();
     const { effectiveStart, effectiveEnd, randMs } = computeEffectiveWindow(user, now);
     user._effectiveStartUTC = effectiveStart;
     user._effectiveEndUTC = effectiveEnd;
     user._startJitterMin = Math.round(randMs / 60000);
-
     logActivity(userId, `📅 Plan: start=${effectiveStart.toUTCString()} (jitter ${user._startJitterMin}m), end=${effectiveEnd.toUTCString()}`);
 
-    const claim1 = addMs(effectiveStart, minutesToMs(35));
-    const claim2 = addMs(claim1, minutesToMs(8 * 60));
-    const claim3 = addMs(effectiveEnd, -minutesToMs(25));
-
+    const c1 = addMs(effectiveStart, minutesToMs(35));
+    const c2 = addMs(c1, minutesToMs(8 * 60));
+    const c3 = addMs(effectiveEnd, -minutesToMs(25));
     const scheduleClaim = (when, label) => {
         const delay = when.getTime() - Date.now();
         if (delay <= 0) { logActivity(userId, `⏭ ${label} skipped`); return; }
         const t = setTimeout(async () => {
             try {
                 if (user.isActive) { logActivity(userId, `🏁 ${label}`); await claimAchievements(userId); }
-                else logActivity(userId, `⏸ ${label} skipped`);
-            } catch (e) { logActivity(userId, `⚠️ ${label} err: ${e.message}`); }
+            } catch (e) { logActivity(userId, `⚠️ ${label}: ${e.message}`); }
         }, delay);
         user._achTimers.push(t);
         logActivity(userId, `⏰ ${label} at ${when.toUTCString()}`);
     };
-    scheduleClaim(claim1, 'Ach #1');
-    scheduleClaim(claim2, 'Ach #2');
-    scheduleClaim(claim3, 'Ach #3');
+    scheduleClaim(c1, 'Ach #1');
+    scheduleClaim(c2, 'Ach #2');
+    scheduleClaim(c3, 'Ach #3');
 
-    // Lister
     const listerJitterMin = Number(user.listerJitter) || 150;
     const listerAt = addMs(effectiveStart, minutesToMs(listerJitterMin));
     const listerDelay = listerAt.getTime() - Date.now();
     if (listerDelay > 0) {
         user._listerTimer = setTimeout(async () => {
-            logActivity(userId, `📋 Daily lister firing`);
+            logActivity(userId, '📋 Daily lister firing');
             if (user.isActive && user.jwtToken) {
                 try { await scanAndListCards(userId); }
-                catch (e) { logActivity(userId, `❌ Lister err: ${e.message}`); }
+                catch (e) { logActivity(userId, `❌ Lister: ${e.message}`); }
             }
         }, listerDelay);
         user.nextListerTime = listerAt.toISOString();
@@ -746,17 +686,17 @@ function scheduleDailyPlan(userId) {
         scheduleDailyPlan(userId);
     }, Math.max(rolloverAt.getTime() - Date.now(), 1000));
 }
-
 function scheduleDailyPlanForAllUsers() {
     logActivity('system', '🗓️ Scheduling all daily plans');
     Object.keys(userData).forEach(scheduleDailyPlan);
 }
 
 // ============================================================
-// 📋 SCAN + LIST
+// 📋 SCAN + LIST  (uses BASE_URL_COLLECTIONS / BASE_URL_MARKET)
 // ============================================================
 async function fetchMarketTemplatesForCollection(userId, headers, collectionId) {
     const out = {};
+    if (!BASE_URL_MARKET) return out;
     let page = 1;
     while (page <= 20) {
         const url = `${BASE_URL_MARKET}/market/templates?type=card&page=${page}&categoryId=1&collectionIds=${collectionId}`;
@@ -781,6 +721,10 @@ async function fetchMarketTemplatesForCollection(userId, headers, collectionId) 
 async function scanUserCards(userId) {
     const user = userData[userId];
     if (!user?.jwtToken) return [];
+    if (!BASE_URL_COLLECTIONS) {
+        logActivity(userId, '❌ Scan: BASE_URL_COLLECTIONS empty — set env var (see startup log)');
+        return [];
+    }
 
     const headers = { 'Content-Type': 'application/json', 'x-user-jwt': user.jwtToken };
     const collected = [];
@@ -788,7 +732,7 @@ async function scanUserCards(userId) {
     const summaryUrl = `${BASE_URL_COLLECTIONS}/collections/users/${user.userId}/user-summary?categoryId=1&seasons=2026`;
     const summary = await makeAPIRequest(summaryUrl, 'GET', headers, null, userId);
     if (!summary.success || !Array.isArray(summary.data?.data)) {
-        logActivity(userId, `⚠️ Scan: no collections`);
+        logActivity(userId, `⚠️ Scan: collections fetch failed (status=${summary.status} err=${summary.error || 'none'})`);
         return [];
     }
 
@@ -807,49 +751,39 @@ async function scanUserCards(userId) {
 
     for (const coll of collections) {
         if (!user.isActive) break;
-
         const marketTpl = await fetchMarketTemplatesForCollection(userId, headers, coll.id);
-
         const itemsUrl = `${BASE_URL_COLLECTIONS}/collections/${coll.id}/users/${user.userId}/owned2`;
         const items = await makeAPIRequest(itemsUrl, 'GET', headers, null, userId);
         if (!items.success) { logActivity(userId, `⚠️ Items fail coll ${coll.id}`); continue; }
-
         const cards = items.data?.data?.cards || [];
         for (const item of cards) {
             if (item.status !== 'available') continue;
             if (!item.id || item.mintNumber == null) continue;
-
             const templateId = item.cardTemplateId || null;
             const mkt = templateId != null ? marketTpl[templateId] : null;
             const minted = mkt?.minted || null;
             const rating = Number(item.rating) || 0;
-
             collected.push({
-                id: item.id,
-                mintNumber: Number(item.mintNumber) || 0,
-                rating,
-                templateId,
-                collectionId: coll.id,
-                minted,
+                id: item.id, mintNumber: Number(item.mintNumber) || 0,
+                rating, templateId, collectionId: coll.id, minted,
             });
-
             if (templateId && minted) {
                 recordTemplateCirculation(templateId, minted);
                 mergeCollectionObservation(coll.id, minted, rating);
             }
         }
     }
-
     const seen = new Set();
     const unique = [];
     for (const it of collected) { if (!seen.has(it.id)) { seen.add(it.id); unique.push(it); } }
-    logActivity(userId, `🔍 Scan done: ${unique.length} cards`);
+    logActivity(userId, `🔍 Scan: ${unique.length} unique available cards`);
     return unique;
 }
 
 async function listCardOnMarket(userId, cardId, price) {
     const user = userData[userId];
     if (!user?.jwtToken) return false;
+    if (!BASE_URL_MARKET) return false;
     const r = await makeAPIRequest(`${BASE_URL_MARKET}/market/list`, 'POST',
         { 'Content-Type': 'application/json', 'x-user-jwt': user.jwtToken },
         { id: cardId, type: 'card', price }, userId);
@@ -859,7 +793,6 @@ async function listCardOnMarket(userId, cardId, price) {
 async function scanAndListCards(userId) {
     const user = userData[userId];
     if (!user?.jwtToken) { logActivity(userId, '❌ no JWT'); return { scanned: 0, listed: 0, failed: 0 }; }
-
     logActivity(userId, '🔍 Scan+list start');
     const cards = await scanUserCards(userId);
     await saveCirculationCache();
@@ -875,16 +808,15 @@ async function scanAndListCards(userId) {
         const card = cards[i];
         const info = calculateListingPrice(card, userId, { aggression, pricingPeriod: period });
         logActivity(userId,
-            `💵 [${i+1}/${cards.length}] Card ${card.id} M=${card.mintNumber} R=${card.rating.toFixed(2)} ` +
+            `💵 [${i+1}/${cards.length}] ${card.id} M=${card.mintNumber} R=${card.rating.toFixed(2)} ` +
             `→ ${info.price.toFixed(2)} ` +
-            `(tier=${info.tier}, CL=${info.circulationUsed}/${info.circulationSource}, ` +
+            `(${info.tier}, CL=${info.circulationUsed}/${info.circulationSource}, ` +
             `base=${info.basePrice.toFixed(2)}, RM=${info.randomValue.toFixed(2)}, A=${aggression})`);
-
         const ok = await listCardOnMarket(userId, card.id, info.price);
         if (ok) listed++; else failed++;
         if (i < cards.length - 1) await sleep(delay);
     }
-    logActivity(userId, `📋 Listed ${listed}, failed ${failed}, of ${cards.length}`);
+    logActivity(userId, `📋 Listed ${listed}, failed ${failed} of ${cards.length}`);
     return { scanned: cards.length, listed, failed };
 }
 
@@ -899,17 +831,13 @@ function startContinuousOperations() {
             if (!u.nextSpinTime || new Date() >= new Date(u.nextSpinTime)) await executeSpin(userId);
         }
     }, 30000);
-
     setInterval(async () => {
         for (const userId of Object.keys(userData)) {
             if (isWithinActiveWindow(userId) && userData[userId].isActive) await checkFunds(userId);
         }
     }, 60 * 60 * 1000);
 }
-
-function startScheduledTasks() {
-    scheduleDailyPlanForAllUsers();
-}
+function startScheduledTasks() { scheduleDailyPlanForAllUsers(); }
 
 // ============================================================
 // 🌐 API ROUTES
@@ -923,7 +851,28 @@ app.get('/api/user/:userId/activity', (req, res) => {
 });
 app.get('/api/debug-logs', (req, res) => res.json(debugLogs.slice(0, parseInt(req.query.limit) || 50)));
 
-// Spinner config (global)
+// Diagnostic — hit this if scanner 404s
+app.get('/api/test-collections/:userId', async (req, res) => {
+    const userId = req.params.userId;
+    const user = userData[userId];
+    if (!user?.jwtToken) return res.status(400).json({ error: 'No JWT for user' });
+    if (!BASE_URL_COLLECTIONS) return res.status(500).json({
+        error: 'BASE_URL_COLLECTIONS empty',
+        KOLEX_API_BASE,
+        BASE_URL_SPRAY,
+        hint: 'Set BASE_URL_COLLECTIONS env var to the API root (e.g. https://api.kolex.gg/api/v1)',
+    });
+    const url = `${BASE_URL_COLLECTIONS}/collections/users/${user.userId}/user-summary?categoryId=1&seasons=2026`;
+    const result = await makeAPIRequest(url, 'GET', { 'x-user-jwt': user.jwtToken }, null, userId);
+    res.json({
+        url,
+        success: result.success,
+        status: result.status,
+        error: result.error,
+        dataPreview: result.data ? JSON.stringify(result.data).slice(0, 800) : null,
+    });
+});
+
 app.get('/api/spinner-config', (req, res) => res.json(globalSpinnerConfig));
 app.post('/api/spinner-config', async (req, res) => {
     const { spinnerId, packIds, autoFetch } = req.body;
@@ -938,7 +887,6 @@ app.post('/api/spinner-config', async (req, res) => {
     res.json({ success: true, config: globalSpinnerConfig });
 });
 
-// Global forced spinner check (uses first user with JWT)
 app.post('/api/spinner-check', async (req, res) => {
     let userId = req.body?.userId;
     if (!userId) userId = Object.keys(userData).find(id => userData[id].jwtToken);
@@ -948,7 +896,6 @@ app.post('/api/spinner-check', async (req, res) => {
     res.json({ success, config: globalSpinnerConfig, usedUserId: userId });
 });
 
-// Per-user forced spinner check
 app.post('/api/user/:userId/spinner-check', async (req, res) => {
     const userId = req.params.userId;
     if (!userData[userId]) return res.status(404).json({ error: 'User not found' });
@@ -957,7 +904,6 @@ app.post('/api/user/:userId/spinner-check', async (req, res) => {
     res.json({ success, config: globalSpinnerConfig, usedUserId: userId });
 });
 
-// Listing config
 app.get('/api/listing-config', (req, res) => res.json(globalListingConfig));
 app.post('/api/listing-config', async (req, res) => {
     if (req.body.delayMs !== undefined) globalListingConfig.delayMs = Math.max(parseInt(req.body.delayMs) || 2400, 100);
@@ -966,14 +912,12 @@ app.post('/api/listing-config', async (req, res) => {
     res.json({ success: true, config: globalListingConfig });
 });
 
-// Circulation cache peek (debug)
 app.get('/api/circulation-cache', (req, res) => res.json({
     templateCount: Object.keys(templateCirculationCache).length,
     collectionCount: Object.keys(collectionCirculationProfiles).length,
     collectionProfiles: collectionCirculationProfiles,
 }));
 
-// Exports
 app.get('/api/export/user-jwt', (req, res) => {
     const out = {};
     for (const [id, u] of Object.entries(userData)) out[id] = { userId: id, jwtToken: u.jwtToken || '' };
@@ -988,7 +932,6 @@ app.get('/api/export/full-data', (req, res) => {
     res.json(out);
 });
 
-// Manual triggers
 app.post('/api/user/:userId/refresh', async (req, res) => res.json({ success: await refreshToken(req.params.userId) }));
 app.post('/api/user/:userId/spin', async (req, res) => res.json({ success: !!(await executeSpin(req.params.userId)) }));
 app.post('/api/user/:userId/claim-achievements', async (req, res) => res.json({ success: true, claimed: await claimAchievements(req.params.userId) }));
