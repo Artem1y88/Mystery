@@ -1,25 +1,5 @@
 [
   {
-    "userId": "4931",
-    "refreshToken": "eyJhbGciOiJIUzM4NCIsInR5cCI6IkpXVCJ9.eyJkYXRhIjoiY3Nsb0NZUnNjYWxZK3VzNGdZci9kdz09OnJFMFcyTndWSVhHQlZCZjFuRkNJR096UlIzOElJc0pwL1plNXhMdXZFbHFGT2NuTHN5UmJEZDNNNkJZK2gwbTFXVnI2ZUhIZjdwQ3VaSGsrODhMVU5PWVlDM0NSQUZrcUY4b2NUZWRyaGZLNHdPNTZ4aEY4TWVWWElkdmRuWG9ITEpZRDM0eGRMT0hRTWtoRG1rNWMrM21ucy9ETG1STU1xb1FBZFpKbUcrNXhBMzMwOUxJZ0tLd05DTTBtWmw0bFpuemlCSTZwZ05wM3owZ205Z0V1OUtqMTdQL3EyRktNb1poaTVOejNONW89IiwidmVyc2lvbiI6MSwiaWF0IjoxNzQ2MTc3ODQ3LCJpc3MiOiJlcGljcy5nZyJ9.KFRnZUWFwRQcpLdnW7OJqIrcaTcDasy5Pd9-aCgRyU14gsIanmxSAB1yn8RYYE1o",
-    "userNick": "Napk1ns",
-    "dayStart": "4:40",
-    "dayEnd": "21:59",
-    "baseInterval": "31",
-    "randomScale1": "1",
-    "randomScale2": "9"
-  },
-  {
-    "userId": "16299",
-    "refreshToken": "eyJhbGciOiJIUzM4NCIsInR5cCI6IkpXVCJ9.eyJkYXRhIjoiVndaOFg1RGtLeXZ2OHhQWWZwWWxjUT09OnozTGlsQ0tScGhjcHFWL0c0dVhQNWVRaFFiWnpFUlg0SU4zT0tsODl1VytWZ241cWJnSmJKTk55WVhBMXZFN0JxR05ESHptMUdtQ2pkL1V0RFpFeWxoRk1MTjQ2Q0dieWw0dWpDQjZWZkVOQXhTTDJCdHZxblhEbk40dWh0cEFOb3BTYis4dVJoNlFiNG0xanJpMCtnak83ei9VRFRzMDl2OXdBVURFYU1IeWJSdGZCaG5OOThpV003b29Nc29CbkhQZXlReXBDU2lmYllGaHdEMW1RUGgvbWNYZE9mYUFZejBkK2hxVWZ0aGc9IiwidmVyc2lvbiI6MSwiaWF0IjoxNzQ5NTg1NTU1LCJpc3MiOiJlcGljcy5nZyJ9.IvwEbRHkW1ygaQNxmIEkWHBHHyI0OS5bfWinUyYOWY9pOBQ4rlj9LlgOw4uqMrBK",
-    "userNick": "Spokowich",
-    "dayStart": "4:58",
-    "dayEnd": "21:27",
-    "baseInterval": "31",
-    "randomScale1": "2",
-    "randomScale2": "7"
-  },
-  {
     "userId": "68802",
     "refreshToken": "eyJhbGciOiJIUzM4NCIsInR5cCI6IkpXVCJ9.eyJkYXRhIjoibFUyWWlLd0lIb3lyRzFPWkNxVS9HQT09OlZ4YVZyU0prQ0YvbmEwOWpXRXpDYW01ZGlEQlB3S3ZHWkF6ZFBjSFB0MHN6UldFT25FdWo1empnM1V1ZVUwUHpoSUN0K0tRY05QTmJLTWNZby8yZEthYVlQM2pRNVRnNTlpWWw4Y28vamFpNUx2UEFVUTYza0FlcVRLcXZBejdXNncrNll6MnJ3QVFhV3ZpR2RlcWN2SUhUd2V5Zm9oTW1UMnhTeW9xNUlzcEFmUC9kQ3RxNUhyZDZhSzdVQjZOT1BZWWs2cVNpUERQSWtVWm1PRjAwMXc9PSIsInZlcnNpb24iOjEsImlhdCI6MTc0OTU4NTg0MiwiaXNzIjoiZXBpY3MuZ2cifQ.RzeKR9UvlplC03miMfybzP6142S0G_aNuk017v83nE0_gE219j9V467MFqCTRA3d",
     "userNick": "Aselwyn",
@@ -27,36 +7,8 @@
     "dayEnd": "23:55",
     "baseInterval": "31",
     "randomScale1": "3",
-    "randomScale2": "11"
-  },
-  {
-    "userId": "148201",
-    "refreshToken": "eyJhbGciOiJIUzM4NCIsInR5cCI6IkpXVCJ9.eyJkYXRhIjoiZnJZMHFjN21wYkI5NE5CbGlqeUd5Zz09OlVIeVc2UnAzM0dheHdHUi9XQTBFUDFXZzNXK3ZoeU54dlFEd0QxNVJwSEM1cVdrczRyajdkYStCVUpQcll3bW5Sc0ppdHlKSGxaZHNNQjNTUzBtUWo4MzlOaVlRSlJucUUzOUZTWVBkdlVSZUszVFQ4TTB2bjUrODFnUkY0S1JjUWJrOGFuT1RaYVRSa0dKdVV1TjV4d1REVlVPUTUyakNDR2dOQjErT1ViQnVqbEp5ZEpDblh2WnlqY3JLY3RYWHdISzdsekYxRXp0TG44ejNyd3d0OEtJNU94ZkVtcGlxNUdRanBsME8xem89IiwidmVyc2lvbiI6MSwiaWF0IjoxNzQ5NTg2MDQ3LCJpc3MiOiJlcGljcy5nZyJ9.Wmki3k-gJrP_qZEEjgTq5QZSD5-apodTCIyhdj_lkPWkXKEIGXNCL-d3XIxCx33W",
-    "userNick": "LUQERA99TAP",
-    "dayStart": "5:56",
-    "dayEnd": "22:47",
-    "baseInterval": "31",
-    "randomScale1": "1",
-    "randomScale2": "5"
-  },
-  {
-    "userId": "405749",
-    "refreshToken": "eyJhbGciOiJIUzM4NCIsInR5cCI6IkpXVCJ9.eyJkYXRhIjoiVEtPbS9PazlKbVNrSmdsVzd1eEl1dz09OklhQ3hWZlZXczY1NVIwa1AzZXY4allOQlNPUU5CMTNCWk4yWXBUNFBweDdQbGVhK2x2LzJyZnZleXZBNlozRGFoVGJnYVpTMUFxU1NUclRyWCtMcGxyelhaNy94UlZBcVJhUnAvMW9wVGpuUSt0dnNWc2k2ZWU2OE85d0h5NXdoaXZzZks2SFpaaU52NVBFOURUOWFUOS9XOUZ6dHQ2VW55WXRUQmlXZmVJUFBRaU1ienJJUkFSYlJJaElpcVdBMHFTdGx3ZllycFE0TW9MY3Y1eTE2NVE9PSIsInZlcnNpb24iOjEsImlhdCI6MTc3MTM2NTk5MCwiaXNzIjoiZXBpY3MuZ2cifQ.FKiPS60cFlii_xLcOCYUKipWyXFjxFvdcz6nqQiS6y6BI7MVJHOhXLIqX_0yT_he",
-    "userNick": "majorpaynis",
-    "dayStart": "7:03",
-    "dayEnd": "23:29",
-    "baseInterval": "31",
-    "randomScale1": "2",
-    "randomScale2": "11"
-  },
-  {
-    "userId": "501469",
-    "refreshToken": "eyJhbGciOiJIUzM4NCIsInR5cCI6IkpXVCJ9.eyJkYXRhIjoiUE12L1dXV1k5dUdBb0RLVlgwcTgrZz09OjVrSnhGbEdPZ0JSdFpoQ2Y5dGwwZHRwbVRXOTZpMUVJb21lOGc2enM1c2pqMmdJNDJpajJ2bHB0UC9ZRlY2amthaXZUTW5CQ2NBdUYzV1FvSEdpWlYrKy94K010YTUyNW1CV3d6TE5Bd2EvZ0ZudWtYUzNkbTRUaHR6OE5JU1k3WDZtZDAwQTZZMEdNd1hEMDJURVZPc2F5d0VZbFUwaVl6b2NrRnhPQ2VRWjZoRWNKWmx2WU1KZGYrQUJkVWFpNWhsT1BJY2pMeUUrNUQycEVzYmFLWmZ1Y0NPTFUxV2lTV1dlL28rTGtNY2c9IiwidmVyc2lvbiI6MSwiaWF0IjoxNzQ5NTg1NjAyLCJpc3MiOiJlcGljcy5nZyJ9.RZrYWaK0kFLATpvYSqi3N-4WPpT4rwqazD6BafTa8xxgHDmYg8LLcaRF2k6DLWzM",
-    "userNick": "tan1ke",
-    "dayStart": "5:03",
-    "dayEnd": "22:36",
-    "baseInterval": "31",
-    "randomScale1": "2",
-    "randomScale2": "8"
+    "randomScale2": "11",
+	"lister-jitter": 150,
+  "aggression": 0.3
   }
 ]

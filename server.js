@@ -1,863 +1,1010 @@
 const express = require('express');
+const cron = require('node-cron');
 const axios = require('axios');
 const fs = require('fs').promises;
+const path = require('path');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Configuration
-const CONFIG = {
-    BASE_URL_REF: process.env.BASE_URL_REF,
-    BASE_URL_SPIN: process.env.BASE_URL_SPIN,
-    BASE_URL_BUY_SPIN: process.env.BASE_URL_BUY_SPIN,
-    BASE_URL_OPENPACK: process.env.BASE_URL_OPENPACK,
-    BASE_URL_ACH: process.env.BASE_URL_ACH,
-    BASE_URL_MONEY: process.env.BASE_URL_MONEY,
-    USERS_FILE: 'users.json',
-    SPINNER_CONFIG_FILE: 'spinner-config.json',
-};
-
-// Prize mapping for console logs only
-const PRIZE_MAP = {
-    12314: '5,000 Spraycoins',
-    12316: 'Standard Box 2026',
-    12315: '500 Spraycoins',
-    12313: '1,000,000 Spraycoins',
-    12312: '100,000 Spraycoins',
-    12311: '2,500 Spraycoins',
-    12310: '1,000 Spraycoins'
-};
-
-// Retry configuration
-const RETRY_CONFIG = {
-    MAX_RETRIES: 3,
-    INITIAL_DELAY: 5000,      // 5 seconds
-    BACKOFF_MULTIPLIER: 3,    // 5, 15, 45 seconds
-    RATE_LIMIT_DELAY: 25000,   // 25 seconds for 429 errors
-    MAX_RETRY_DELAY: 60000     // Max 60 seconds
-};
-
-// ─── GLOBAL SPINNER CONFIG (dynamic, persisted to disk) ───
-let globalSpinnerConfig = {
-    spinnerId: 7063,
-    packIds: [11953, 12053, 12079, 12121, 12145, 12316, 14356, 12343, 12350, 14554]
-};
-
-// Global state
-let userData = {};
-let userQueue = [];
-let activeUserIds = [];
-let processingTimeout = null;
-let isPaused = false;
-
-// Settings (will be set via dashboard)
-let settings = {
-    maxConcurrent: 17,
-    spinDelay: 2.5,
-    minFundsThreshold: 200000
-};
-
-// Debug logs (only important events for dashboard)
+// ============================================================
+// 🎯 DEBUG LOGGING
+// ============================================================
 const debugLogs = [];
-
-// Log function - important events only for dashboard
-function log(userId, message, type = 'INFO') {
-    const timestamp = new Date().toISOString();
-    const logEntry = { timestamp, userId, message, type };
-    
-    // Always show in console with type
-    console.log(`[${timestamp}] [${type}] ${userId}: ${message}`);
-    
-    // Store for dashboard (limited to 200)
-    debugLogs.unshift(logEntry);
+function debugLog(userId, action, url, method, headers = {}, data = null, response = null, error = null) {
+    const entry = {
+        timestamp: new Date().toISOString(), userId, action,
+        request: { url, method, headers: JSON.stringify(headers, null, 2), body: data ? JSON.stringify(data, null, 2) : null },
+        response: response ? { status: response.status, data: JSON.stringify(response.data, null, 2) } : null,
+        error: error ? {
+            message: error.message, status: error.response?.status,
+            data: error.response?.data ? JSON.stringify(error.response.data, null, 2) : null
+        } : null
+    };
+    debugLogs.unshift(entry);
     if (debugLogs.length > 200) debugLogs.pop();
+    console.log('\n' + '='.repeat(80));
+    console.log(`🔍 DEBUG [${entry.timestamp}] - USER: ${userId}`);
+    console.log(`📝 ACTION: ${action}`);
+    console.log(`📡 REQUEST: ${method} ${url}`);
+    if (data) console.log(`   BODY:`, JSON.stringify(data, null, 2));
+    if (response) { console.log(`✅ STATUS: ${response.status}`); console.log(`   DATA:`, JSON.stringify(response.data, null, 2)); }
+    if (error) { console.log(`❌ ERROR: ${error.message}`); if (error.response) console.log(`   RESP DATA:`, JSON.stringify(error.response.data, null, 2)); }
+    console.log('='.repeat(80) + '\n');
 }
 
-// ─── SPINNER CONFIG LOAD/SAVE ───
-async function loadSpinnerConfig() {
+app.use(express.json());
+app.use(express.static('public'));
+
+// ============================================================
+// ⚙️ CONFIG
+// ============================================================
+const CONFIG = {
+    BASE_URL: process.env.BASE_URL,
+    BASE_URL_REF: process.env.BASE_URL_REF,
+    BASE_URL_MONEY: process.env.BASE_URL_MONEY,
+    BASE_URL_SPRAY: process.env.BASE_URL_SPRAY,
+    BASE_URL_ACH: process.env.BASE_URL_ACH,
+    BASE_URL_OPENPACK: process.env.BASE_URL_OPENPACK,
+    USERS_FILE: 'users.json',
+};
+const BASE_URL = CONFIG.BASE_URL;
+const BASE_URL_REF = CONFIG.BASE_URL_REF;
+const BASE_URL_MONEY = CONFIG.BASE_URL_MONEY;
+const BASE_URL_SPRAY = CONFIG.BASE_URL_SPRAY;
+const BASE_URL_ACH = CONFIG.BASE_URL_ACH;
+const BASE_URL_OPENPACK = CONFIG.BASE_URL_OPENPACK;
+const USERS_CONFIG = CONFIG.USERS_FILE;
+const BASE_URL_SPINNER = process.env.BASE_URL_SPINNER ||
+    (BASE_URL_SPRAY ? BASE_URL_SPRAY.split('?')[0].replace(/\/spin$/, '') : '');
+const BASE_URL_COLLECTIONS = process.env.BASE_URL_COLLECTIONS || BASE_URL || '';
+const BASE_URL_MARKET = process.env.BASE_URL_MARKET || BASE_URL || '';
+
+// ============================================================
+// 📊 STATE
+// ============================================================
+let userData = {};
+let activityLogs = [];
+
+let globalSpinnerConfig = {
+    spinnerId: 7096,
+    packIds: [11953, 12053, 12079, 12121, 12145, 12316, 14356, 12343, 12350, 14554],
+    autoFetch: true,
+    lastAutoFetch: null,
+};
+
+let globalListingConfig = { delayMs: 2400 };
+
+// Circulation caches (persisted)
+let templateCirculationCache = {};      // { [templateId]: minted }
+let collectionCirculationProfiles = {}; // { [collectionId]: [{minted, count, ratingMin, ratingMax}] }
+
+const DEFAULT_EXCLUDED_COLLECTIONS = new Set([
+    1,2,3,4,5,6,7,8,9,10,11,104,105,106,153,154,155,156,157,158,159,160,161,162,163,164,165,166,167,168,
+    181,183,188,928,929,930,931,932,933,934,935,936,937,938,939,940,941,943,945,946,947,
+    2740,2938,2939,2940,2941,2942,2943,2944,2945,2946,2947,2948,2950,2953,2954,2955,2957,2958,2959,
+    2961,2964,2966,6650,6651,6652,6653,6654,6655,6656,6657,6658,6659,6660,6661,6662,6663,6664,6665,6666,
+    18316,18514,18877,18911,18913,18914,18927,18928,18930,20131,18918,18932,
+    11155,11156,11157,11225,11551,16411,16412,16413,2542,2543,1376,1378,1379,1380,1381,1383,1384,1385
+]);
+
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+// ============================================================
+// 💵 PRICE FORMULA (TIERED)
+// ============================================================
+// Tiers:
+//   legendary: CL <= 150
+//   epic:      150 < CL <= 500
+//   ordinary:  CL > 500
+//
+// Mint desirability B(M): stepped curve with boundaries at 1, 2, 5, 9, 10, 19, 20, 50
+//   For ordinary cards with M >= 11 → B is halved
+//   Mints 1..10 are never halved
+//
+// Price = F + (max(F,V)-F)*B, with confidence premium scale for
+// weak circulation sources; then random+aggression applied to premium only.
+
+function mintDesirability(M, circulation) {
+    const m = Math.max(1, Math.floor(M));
+    let B;
+    if (m === 1) B = 1.00;
+    else if (m === 2) B = 0.60;
+    else if (m <= 5) B = 0.52 - 0.04 * (m - 3);
+    else if (m <= 9) B = 0.38 - 0.025 * (m - 6);
+    else if (m <= 19) B = 0.25 - 0.009 * (m - 10);
+    else if (m <= 49) B = 0.15 * Math.exp(-0.035 * (m - 20));
+    else B = 0.055 * Math.exp(-0.045 * (m - 50));
+    if (circulation > 500 && m >= 11) B *= 0.50; // ordinary halving for mints 11+
+    return B;
+}
+
+function classifyTier(CL) {
+    if (CL <= 150) return 'legendary';
+    if (CL <= 500) return 'epic';
+    return 'ordinary';
+}
+
+function tierFloor(tier, CL) {
+    if (tier === 'legendary') return clamp(2.00 + 0.50 * (150 - CL) / 100, 2.00, 2.50);
+    if (tier === 'epic') return clamp(0.25 + 0.15 * (500 - CL) / 250, 0.25, 0.40);
+    return 0.10;
+}
+
+function mintOneValue(tier, R, CL) {
+    if (tier === 'legendary') return 10.00 * Math.pow(150 / CL, 0.20) * Math.exp(0.25 * (R - 9.00));
+    if (tier === 'epic')      return 5.50 * Math.pow(250 / CL, 0.55) * Math.exp(0.22 * (R - 9.00));
+    return Math.min(5.50, 3.40 * Math.exp(0.28 * (R - 4.30)));
+}
+
+function randomStrength(tier, M, premium) {
+    if (premium < 0.015) return 0;
+    const m = Math.max(1, Math.floor(M));
+    if (tier === 'legendary') {
+        if (m === 1) return 0.51;
+        if (m === 2) return 0.345;
+        if (m <= 5) return 0.27;
+    }
+    if (m === 1) return 0.33;
+    if (m === 2) return 0.27;
+    if (m <= 9) return 0.225;
+    if (m <= 19) return 0.195;
+    if (m <= 49) return 0.15;
+    return 0.10 * clamp(premium / 0.50, 0, 1);
+}
+
+function roundMarketPrice(v) {
+    if (v < 1) return Math.round(v * 100) / 100;
+    if (v < 5) return Math.round(v * 20) / 20;
+    return Math.round(v * 10) / 10;
+}
+
+// Deterministic pseudo-random in [-1, +1]
+function deterministicRandom(seed) {
+    let h = 0;
+    for (let i = 0; i < seed.length; i++) {
+        h = ((h << 5) - h) + seed.charCodeAt(i);
+        h |= 0;
+    }
+    const u = ((h >>> 0) % 100000) / 100000;
+    return u * 2 - 1;
+}
+
+// ---------- Circulation caches ----------
+async function loadCirculationCache() {
     try {
-        const data = await fs.readFile(CONFIG.SPINNER_CONFIG_FILE, 'utf8');
-        const parsed = JSON.parse(data);
-        globalSpinnerConfig = {
-            spinnerId: Number(parsed.spinnerId) || 7063,
-            packIds: Array.isArray(parsed.packIds)
-                ? parsed.packIds.map(Number).filter(n => !isNaN(n))
-                : [11953, 12053, 12079, 12121, 12145, 12316, 14356, 12343, 12350, 14554]
-        };
-        console.log(`[INIT] Loaded spinner config: spinnerId=${globalSpinnerConfig.spinnerId}, packIds=${globalSpinnerConfig.packIds.join(',')}`);
-    } catch (err) {
-        // File doesn't exist yet - write defaults
-        console.log('[INIT] No spinner-config.json found, writing defaults...');
-        try {
-            await fs.writeFile(CONFIG.SPINNER_CONFIG_FILE, JSON.stringify(globalSpinnerConfig, null, 2));
-        } catch (writeErr) {
-            console.error('Failed to write default spinner config:', writeErr);
-        }
+        const raw = await fs.readFile('circulation-cache.json', 'utf8');
+        const parsed = JSON.parse(raw);
+        templateCirculationCache = parsed.templateCache || {};
+        collectionCirculationProfiles = parsed.collectionProfiles || {};
+        console.log(`✅ Loaded circulation cache: ${Object.keys(templateCirculationCache).length} templates, ` +
+                    `${Object.keys(collectionCirculationProfiles).length} collection profiles`);
+    } catch {
+        console.log('ℹ️ No circulation cache yet');
     }
 }
 
-async function saveSpinnerConfig() {
+async function saveCirculationCache() {
     try {
-        await fs.writeFile(CONFIG.SPINNER_CONFIG_FILE, JSON.stringify(globalSpinnerConfig, null, 2));
-        return true;
-    } catch (err) {
-        console.error('Failed to save spinner config:', err);
-        return false;
-    }
+        await fs.writeFile('circulation-cache.json', JSON.stringify({
+            templateCache: templateCirculationCache,
+            collectionProfiles: collectionCirculationProfiles,
+        }, null, 2));
+    } catch (e) { console.error('Failed saving circulation cache:', e); }
 }
 
-// API request function with detailed console logging and error handling
-async function makeAPIRequest(url, method = 'GET', headers = {}, data = null, userId = 'system') {
-    const methodUpper = method.toUpperCase();
-    console.log(`[${new Date().toISOString()}] [API] ${userId}: 🌐 ${methodUpper} ${url.split('?')[0]}`);
-    
-    try {
-        const response = await axios({
-            method: methodUpper,
-            url,
-            headers: { 'Content-Type': 'application/json', ...headers },
-            data,
-            timeout: 15000
-        });
-        console.log(`[${new Date().toISOString()}] [API] ${userId}: ✅ ${methodUpper} ${url.split('?')[0]} (${response.status})`);
-        return { success: true, data: response.data, status: response.status };
-    } catch (error) {
-        const status = error.response?.status;
-        const errorMsg = error.message;
-        
-        console.log(`[${new Date().toISOString()}] [API] ${userId}: ❌ ${methodUpper} ${url.split('?')[0]} - ${errorMsg} (${status || 'unknown'})`);
-        
-        // Handle specific error codes
-        if (status === 401) {
-            return {
-                success: false,
-                error: 'unauthorized',
-                status: 401,
-                retryable: true,
-                needsRefresh: true
-            };
-        }
-        
-        if (status === 429) {
-            return {
-                success: false,
-                error: 'rate_limit',
-                status: 429,
-                retryable: true,
-                rateLimit: true
-            };
-        }
-        
-        // All other errors (including 403) are retryable if they're server errors or network issues
-        const isRetryable = !status || status >= 400 || status === 408 || error.code === 'ECONNABORTED';
-        
-        return {
-            success: false,
-            error: errorMsg,
-            status,
-            retryable: isRetryable
-        };
-    }
+function recordTemplateCirculation(templateId, minted) {
+    if (!templateId || !minted || minted <= 0) return;
+    templateCirculationCache[templateId] = minted;
 }
 
-// Retry wrapper with exponential backoff for atomic operations
-async function retryAtomicOperation(operation, userId, context = 'operation', retryCount = 0) {
-    try {
-        // Attempt the operation
-        const result = await operation();
-        
-        // Check if we need special handling
-        if (!result.success) {
-            // Handle rate limiting
-            if (result.rateLimit) {
-                if (retryCount < RETRY_CONFIG.MAX_RETRIES) {
-                    const waitTime = RETRY_CONFIG.RATE_LIMIT_DELAY;
-                    log(userId, `Rate limited, waiting ${waitTime/1000}s before retry ${retryCount + 1}/${RETRY_CONFIG.MAX_RETRIES}`, 'RETRY');
-                    await new Promise(resolve => setTimeout(resolve, waitTime));
-                    return retryAtomicOperation(operation, userId, context, retryCount + 1);
-                }
-            }
-            
-            // Handle token expiration
-            if (result.needsRefresh) {
-                log(userId, `Token expired, refreshing...`, 'RETRY');
-                const refreshSuccess = await refreshToken(userId);
-                if (refreshSuccess) {
-                    // Retry immediately with new token (don't count as retry)
-                    return retryAtomicOperation(operation, userId, context, retryCount);
-                }
-            }
-            
-            // Handle other retryable errors with exponential backoff
-            if (result.retryable && retryCount < RETRY_CONFIG.MAX_RETRIES) {
-                const delay = Math.min(
-                    RETRY_CONFIG.INITIAL_DELAY * Math.pow(RETRY_CONFIG.BACKOFF_MULTIPLIER, retryCount),
-                    RETRY_CONFIG.MAX_RETRY_DELAY
-                );
-                log(userId, `${context} failed, waiting ${delay/1000}s before retry ${retryCount + 1}/${RETRY_CONFIG.MAX_RETRIES}`, 'RETRY');
-                await new Promise(resolve => setTimeout(resolve, delay));
-                return retryAtomicOperation(operation, userId, context, retryCount + 1);
-            }
-            
-            // Max retries exceeded
-            log(userId, `${context} failed permanently after ${retryCount} retries`, 'ERROR');
-            return result;
-        }
-        
-        // Success! Reset any retry tracking
-        if (userData[userId]) {
-            userData[userId].retryCount = 0;
-        }
-        return result;
-        
-    } catch (error) {
-        // Unexpected error in the retry logic itself
-        log(userId, `Unexpected error in retry logic: ${error.message}`, 'ERROR');
-        return { success: false, error: error.message, permanent: true };
-    }
-}
-
-// Load user configuration
-async function loadUserConfig() {
-    try {
-        const configData = await fs.readFile(CONFIG.USERS_FILE, 'utf8');
-        const users = JSON.parse(configData);
-        
-        for (const user of users) {
-            userData[user.userId] = {
-                userId: user.userId,
-                nick: user.userNick || user.nick || user.name || user.userId,
-                refreshToken: user.refreshToken,
-                jwtToken: null,
-                isActive: false,
-                status: 'idle',
-                initialFunds: 0,
-                currentFunds: 0,
-                totalSpinsRun: 0,
-                totalPacksOpened: 0,
-                achievementsClaimed: 0,
-                spinsRemaining: 0,
-                spinsDoneInRound: 0,
-                lastError: null,
-                startTime: null,
-                endTime: null,
-                retryCount: 0
-            };
-        }
-        
-        log('system', `Loaded ${users.length} users from config`, 'INIT');
-        return true;
-    } catch (error) {
-        console.error('Error loading user config:', error);
-        return false;
-    }
-}
-
-// Refresh token for a user
-async function refreshToken(userId) {
-    const user = userData[userId];
-    if (!user) return false;
-    
-    const result = await makeAPIRequest(
-        CONFIG.BASE_URL_REF, 
-        'POST', 
-        { 'Content-Type': 'application/json' },
-        { refreshToken: user.refreshToken },
-        userId
-    );
-
-    if (result.success && result.data.data?.jwt) {
-        user.jwtToken = result.data.data.jwt;
-        user.isActive = true;
-        log(userId, 'Token refreshed', 'TOKEN');
-        return true;
+function mergeCollectionObservation(collectionId, minted, rating) {
+    if (!collectionId || !minted || minted <= 0) return;
+    if (!collectionCirculationProfiles[collectionId]) collectionCirculationProfiles[collectionId] = [];
+    const groups = collectionCirculationProfiles[collectionId];
+    const found = groups.find(g => g.minted === minted);
+    if (found) {
+        found.count += 1;
+        found.ratingMin = Math.min(found.ratingMin, rating);
+        found.ratingMax = Math.max(found.ratingMax, rating);
     } else {
-        user.isActive = false;
-        user.status = 'error';
-        user.lastError = 'Token refresh failed';
-        log(userId, 'Token refresh failed', 'ERROR');
-        return false;
+        groups.push({ minted, count: 1, ratingMin: rating, ratingMax: rating });
+        groups.sort((a, b) => a.minted - b.minted);
     }
 }
 
-// Check user funds (updates currentFunds)
-async function checkFunds(userId, isInitial = false) {
-    const user = userData[userId];
-    if (!user || !user.jwtToken) return null;
+function resolveCirculation({ totalMinted, templateId, collectionId, mintNumber, rating }) {
+    const M = Math.max(1, Math.floor(mintNumber || 1));
+    const R = clamp(rating || 0, 0, 10);
 
-    const result = await retryAtomicOperation(
-        async () => await makeAPIRequest(
-            CONFIG.BASE_URL_MONEY, 
-            'GET', 
-            { 'x-user-jwt': user.jwtToken }, 
-            null, 
-            userId
-        ),
-        userId,
-        'check funds'
-    );
-    
-    if (result.success && result.data.data) {
-        const silvercoins = result.data.data.silvercoins || 0;
-        user.currentFunds = silvercoins;
-        
-        // Only set initial funds if this is the first check
-        if (isInitial && user.initialFunds === 0) {
-            user.initialFunds = silvercoins;
-            log(userId, `Initial funds: ${silvercoins.toLocaleString()}`, 'FUNDS');
-        } else if (!isInitial) {
-            console.log(`[${new Date().toISOString()}] [FUNDS] ${userId}: Current funds: ${silvercoins.toLocaleString()}`);
-        }
-        
-        return silvercoins;
+    // 1. Direct
+    if (totalMinted != null && Number.isFinite(totalMinted) && totalMinted >= M) {
+        recordTemplateCirculation(templateId, totalMinted);
+        return { circulation: totalMinted, source: 'direct', confidence: 1.00 };
     }
-    return null;
+    // 2. Template cache
+    const cached = templateId != null ? templateCirculationCache[templateId] : undefined;
+    if (cached !== undefined && cached >= M) {
+        return { circulation: cached, source: 'template-cache', confidence: 0.98 };
+    }
+    // 3–7. Collection inference
+    const groups = collectionId != null ? (collectionCirculationProfiles[collectionId] || []) : [];
+    const valid = groups.filter(g => g.minted >= M);
+    if (valid.length === 1) {
+        return { circulation: valid[0].minted, source: 'collection-single', confidence: 0.90 };
+    }
+    if (valid.length > 1) {
+        let best = null, bestDist = Infinity;
+        for (const g of valid) {
+            let dist = 0;
+            if (R < g.ratingMin) dist = g.ratingMin - R;
+            else if (R > g.ratingMax) dist = R - g.ratingMax;
+            // Prefer smaller dist; tie → prefer larger minted (avoid overpricing)
+            if (dist < bestDist || (dist === bestDist && (best === null || g.minted > best.minted))) {
+                best = g; bestDist = dist;
+            }
+        }
+        const confidence = clamp(0.88 - bestDist * 0.15, 0.60, 0.88);
+        return { circulation: best.minted, source: 'collection-rating-match', confidence };
+    }
+    // 8. Global rating fallback
+    let estimated;
+    if (R >= 7.75 && M > 20) estimated = 100;
+    else if (R >= 7.50) estimated = 250;
+    else if (R >= 6.00) estimated = 250;
+    else if (R >= 4.50) estimated = 2500;
+    else estimated = 10000;
+    if (estimated < M) {
+        if (M <= 250) estimated = 250;
+        else if (M <= 500) estimated = 500;
+        else if (M <= 2500) estimated = 2500;
+        else if (M <= 5000) estimated = 5000;
+        else if (M <= 7500) estimated = 7500;
+        else estimated = 10000;
+    }
+    return { circulation: estimated, source: 'rating-fallback', confidence: 0.45 };
 }
 
-// Claim achievements for a user
-async function claimAchievements(userId) {
-    const user = userData[userId];
-    if (!user || !user.jwtToken) return 0;
+/**
+ * MAIN PRICING FUNCTION
+ * card: { id, mintNumber, rating, templateId, collectionId, minted }
+ * opts: { aggression, pricingPeriod, randomValue }
+ */
+function calculateListingPrice(card, userId, opts = {}) {
+    const M = Math.max(1, Math.floor(card.mintNumber || 1));
+    const R = clamp(card.rating || 0, 0, 10);
+    const aggression = clamp(opts.aggression ?? 0, -1, 1);
 
-    let totalClaimed = 0;
-    const userAchievementsUrl = `${CONFIG.BASE_URL_ACH}/${user.userId}/user`;
-    const headers = { 'x-user-jwt': user.jwtToken };
-
-    const achievementsResult = await retryAtomicOperation(
-        async () => await makeAPIRequest(userAchievementsUrl, 'GET', headers, null, userId),
-        userId,
-        'fetch achievements'
-    );
-    
-    if (!achievementsResult.success) {
-        return 0;
-    }
-
-    const validIDs = [];
-    const categories = ['achievements', 'daily', 'weekly', 'monthly'];
-
-    categories.forEach((category) => {
-        if (achievementsResult.data.data[category]) {
-            achievementsResult.data.data[category].forEach((item) => {
-                if (item.progress?.claimAvailable) {
-                    validIDs.push(item.id);
-                }
-            });
-        }
+    const circ = resolveCirculation({
+        totalMinted: card.minted,
+        templateId: card.templateId,
+        collectionId: card.collectionId,
+        mintNumber: M,
+        rating: R,
     });
+    const CL = circ.circulation;
+    const tier = classifyTier(CL);
+    const F = tierFloor(tier, CL);
+    const V = Math.max(F, mintOneValue(tier, R, CL));
+    const B = mintDesirability(M, CL);
 
-    if (validIDs.length === 0) return 0;
+    let basePrice = F + (V - F) * B;
 
-    log(userId, `Found ${validIDs.length} achievements to claim`, 'ACH');
+    // Confidence premium reduction for weak sources
+    if (circ.source === 'rating-fallback') basePrice = F + (basePrice - F) * 0.82;
+    else if (circ.source === 'collection-rating-match') basePrice = F + (basePrice - F) * 0.95;
 
-    for (const achievementId of validIDs) {
-        const claimUrl = `${CONFIG.BASE_URL_ACH}/${achievementId}/claim/`;
-        const claimResult = await retryAtomicOperation(
-            async () => await makeAPIRequest(claimUrl, 'POST', headers, null, userId),
-            userId,
-            'claim achievement'
-        );
-        
-        if (claimResult.success) {
-            totalClaimed++;
-        }
-        
-        // Small delay between claims
-        await new Promise(resolve => setTimeout(resolve, 500));
-    }
+    const premium = Math.max(0, basePrice - F);
+    const rs = randomStrength(tier, M, premium);
 
-    if (totalClaimed > 0) {
-        user.achievementsClaimed += totalClaimed;
-        log(userId, `Claimed ${totalClaimed} achievements`, 'ACH');
-    }
-    
-    return totalClaimed;
-}
+    const period = opts.pricingPeriod || new Date().toISOString().slice(0, 10);
+    const RM = (opts.randomValue != null) ? clamp(opts.randomValue, -1, 1)
+                                          : deterministicRandom(`${card.id}:${userId}:${period}`);
 
-// Buy and execute spin as ONE ATOMIC OPERATION
-// Uses dynamic globalSpinnerConfig.spinnerId and globalSpinnerConfig.packIds
-async function buyAndSpinAtomic(userId) {
-    const user = userData[userId];
-    if (!user?.jwtToken) return { success: false };
+    const randomMultiplier = Math.exp(rs * RM);
+    const aggressionMultiplier = Math.exp(0.12 * aggression);
 
-    // Buy spin
-    const buyResult = await makeAPIRequest(
-        CONFIG.BASE_URL_BUY_SPIN,
-        'POST',
-        { 'x-user-jwt': user.jwtToken },
-        { categoryId: 1, amount: 1 },
-        userId
-    );
+    let adjustedPrice = F + premium * randomMultiplier * aggressionMultiplier;
 
-    if (!buyResult.success) {
-        // Pass through error types
-        return {
-            success: false,
-            needsRefresh: buyResult.needsRefresh,
-            rateLimit: buyResult.rateLimit,
-            retryable: buyResult.retryable,
-            error: buyResult.error,
-            stage: 'buy'
-        };
-    }
+    // Guardrails
+    const minRatio = tier === 'legendary' && M === 1 ? 0.70 : 0.78;
+    const maxRatio = tier === 'legendary' && M === 1 ? 1.55 : 1.35;
+    adjustedPrice = clamp(adjustedPrice, Math.max(F, basePrice * minRatio), basePrice * maxRatio);
 
-    // Execute spin with DYNAMIC spinner ID
-    const spinResult = await makeAPIRequest(
-        CONFIG.BASE_URL_SPIN,
-        'POST',
-        { 'x-user-jwt': user.jwtToken },
-        { spinnerId: globalSpinnerConfig.spinnerId },
-        userId
-    );
-
-    if (!spinResult.success) {
-        // Spin failed but buy succeeded - log it
-        log(userId, 'CRITICAL: Spin purchased but execution failed', 'ERROR');
-        return {
-            success: false,
-            needsRefresh: spinResult.needsRefresh,
-            rateLimit: spinResult.rateLimit,
-            retryable: spinResult.retryable,
-            error: spinResult.error,
-            stage: 'spin',
-            boughtButFailed: true
-        };
-    }
-
-    // Both operations succeeded
-    const spinData = spinResult.data.data;
-    const resultId = spinData.id;
-    
-    // Log spin result to console only
-    const prizeName = PRIZE_MAP[resultId] || `Prize ID ${resultId}`;
-    console.log(`[${new Date().toISOString()}] [SPIN] ${userId}: 🎰 Result: ${prizeName}`);
-
-    // Check for pack using DYNAMIC pack ID list
-    let packOpened = false;
-    if (globalSpinnerConfig.packIds.includes(resultId) && spinData.packs?.length > 0) {
-        const packId = spinData.packs[0].id;
-        log(userId, `Got pack from spin!`, 'PACK');
-        
-        const packResult = await makeAPIRequest(
-            CONFIG.BASE_URL_OPENPACK,
-            'POST',
-            { 'x-user-jwt': user.jwtToken },
-            { packId },
-            userId
-        );
-
-        if (packResult.success) {
-            packOpened = true;
-            log(userId, `Pack opened successfully`, 'PACK');
-        }
-    }
+    // Absolute ceiling
+    adjustedPrice = Math.min(adjustedPrice, 15.00);
+    const finalPrice = Math.max(F, adjustedPrice);
 
     return {
-        success: true,
-        spinData,
-        packOpened,
-        resultId,
-        prizeName
+        price: roundMarketPrice(finalPrice),
+        basePrice: roundMarketPrice(basePrice),
+        floor: F,
+        mintOneValue: V,
+        mintFactor: B,
+        tier,
+        circulationUsed: CL,
+        circulationSource: circ.source,
+        circulationConfidence: circ.confidence,
+        randomValue: RM,
+        randomStrength: rs,
+        randomMultiplier,
+        aggression,
+        aggressionMultiplier,
     };
 }
 
-// Process a single spin for a user (with full atomic retry)
-async function processUserSpin(userId) {
-    const user = userData[userId];
-    if (!user) return { success: false };
+function getUserAggression(user) {
+    return clamp(Number(user.aggression ?? 0), -1, 1);
+}
 
-    // Use the atomic retry wrapper around the entire buy+spin operation
-    const result = await retryAtomicOperation(
-        async () => await buyAndSpinAtomic(userId),
-        userId,
-        'buy+spin'
-    );
+// ============================================================
+// 🚀 INIT
+// ============================================================
+async function initializeApp() {
+    try {
+        console.log('🚀 INITIALIZING...');
+        await loadUserConfig();
+        await loadCirculationCache();
 
-    if (result.success) {
-        // Update user stats
-        user.totalSpinsRun++;
-        user.spinsDoneInRound++;
-        user.spinsRemaining--;
-        user.retryCount = 0;
-        
-        // Handle pack opening delay if needed
-        if (result.packOpened) {
-            user.totalPacksOpened++;
-            await new Promise(resolve => setTimeout(resolve, 3000));
+        // Spinner config
+        try {
+            const saved = await fs.readFile('spinner-config.json', 'utf8');
+            const parsed = JSON.parse(saved);
+            globalSpinnerConfig = {
+                spinnerId: parsed.spinnerId || globalSpinnerConfig.spinnerId,
+                packIds: Array.isArray(parsed.packIds) ? parsed.packIds : globalSpinnerConfig.packIds,
+                autoFetch: parsed.autoFetch !== undefined ? !!parsed.autoFetch : true,
+                lastAutoFetch: parsed.lastAutoFetch || null,
+            };
+        } catch { await saveSpinnerConfig(); }
+
+        // Listing config
+        try {
+            const saved = await fs.readFile('listing-config.json', 'utf8');
+            const parsed = JSON.parse(saved);
+            globalListingConfig.delayMs = parsed.delayMs || 2400;
+        } catch { await fs.writeFile('listing-config.json', JSON.stringify(globalListingConfig, null, 2)); }
+
+        for (const userId of Object.keys(userData)) await refreshToken(userId);
+
+        startImmediateOperations();
+        startScheduledTasks();
+        startContinuousOperations();
+    } catch (e) { console.error('❌ Init failed:', e); }
+}
+
+function startImmediateOperations() {
+    setTimeout(() => {
+        Object.keys(userData).forEach(userId => {
+            const user = userData[userId];
+            if (user.isActive && isWithinActiveWindow(userId)) {
+                setTimeout(() => claimAchievements(userId), 10000);
+                checkFunds(userId);
+                if (!user.nextSpinTime) calculateNextSpinTime(userId);
+            }
+        });
+    }, 120000);
+}
+
+async function loadUserConfig() {
+    try {
+        const raw = await fs.readFile(USERS_CONFIG, 'utf8');
+        const users = JSON.parse(raw);
+        for (const u of users) {
+            userData[u.userId] = {
+                ...u, jwtToken: null, lastRefresh: null, nextSpinTime: null, nextListerTime: null,
+                spinCount: 0, achievementsClaimed: 0, lastFunds: 0, lastCoronas: 0, lastUsd: 0,
+                logs: [], isActive: false, dailyAchievementsDone: false, dailyFundsChecks: 0, packsOpened: 0,
+                aggression: u.aggression != null ? Number(u.aggression) : 0,
+                listerJitter: u.listerJitter ?? u['lister-jitter'] ?? 150,
+            };
         }
-        
-        return { success: true };
-        
-    } else {
-        // Mark as error
-        user.status = 'error';
-        user.lastError = result.error || 'Spin failed';
-        
-        if (result.boughtButFailed) {
-            log(userId, 'WARNING: Spin was purchased but execution failed', 'ERROR');
-        }
-        
-        return { success: false };
+        console.log(`✅ Loaded ${users.length} users`);
+    } catch (e) { console.error('❌ User config error:', e); userData = {}; }
+}
+
+// ============================================================
+// 🔌 API REQUEST HELPER
+// ============================================================
+async function makeAPIRequest(url, method = 'GET', headers = {}, data = null, userId = 'system') {
+    try {
+        debugLog(userId, 'REQ', url, method, headers, data);
+        const response = await axios({
+            method: method.toLowerCase(), url,
+            headers: { 'Content-Type': 'application/json', ...headers },
+            data, timeout: 20000,
+        });
+        debugLog(userId, 'RES', url, method, headers, data, response);
+        return { success: true, data: response.data, status: response.status };
+    } catch (error) {
+        debugLog(userId, 'ERR', url, method, headers, data, null, error);
+        return { success: false, error: error.message, status: error.response?.status, responseData: error.response?.data };
     }
 }
 
-// Initialize a user for a new round (checks current funds)
-async function initializeUserRound(userId) {
+// ============================================================
+// 🎡 SPINNER
+// ============================================================
+async function saveSpinnerConfig() {
+    try { await fs.writeFile('spinner-config.json', JSON.stringify(globalSpinnerConfig, null, 2)); }
+    catch (e) { console.error('save spinner:', e); }
+}
+
+async function fetchAndUpdateSpinnerInfo(userId, force = false) {
     const user = userData[userId];
-    if (!user || !user.isActive) return false;
+    if (!user?.jwtToken) { logActivity('system', `❌ Spinner fetch: no JWT for ${userId}`); return false; }
+    if (!force) {
+        if (!globalSpinnerConfig.autoFetch) { logActivity('system', `⏭ Spinner: autoFetch off`); return false; }
+        if (globalSpinnerConfig.lastAutoFetch) {
+            const elapsed = Date.now() - new Date(globalSpinnerConfig.lastAutoFetch).getTime();
+            if (elapsed < 5 * 60 * 1000) return true;
+        }
+    }
+    if (!BASE_URL_SPINNER) { logActivity('system', `❌ BASE_URL_SPINNER missing`); return false; }
 
-    // Check current funds (this updates currentFunds)
-    const funds = await checkFunds(userId, false);
-    if (!funds) return false;
-
-    // If funds below threshold, user is done
-    if (funds < settings.minFundsThreshold) {
-        user.status = 'completed';
-        user.endTime = new Date().toISOString();
-        log(userId, `User completed (final funds: ${funds.toLocaleString()})`, 'DONE');
+    const url = `${BASE_URL_SPINNER}?categoryId=1`;
+    const res = await makeAPIRequest(url, 'GET', { 'Content-Type': 'application/json', 'x-user-jwt': user.jwtToken }, null, userId);
+    if (!res.success || !res.data?.data) {
+        logActivity('system', `❌ Spinner fetch failed: ${res.error || 'no data'}`);
         return false;
     }
+    const data = res.data.data;
+    const items = Array.isArray(data.items) ? data.items : [];
+    const packPrizeIds = items
+        .filter(it => Array.isArray(it.properties?.pack_templates) && it.properties.pack_templates.length > 0)
+        .map(it => it.id);
 
-    // Calculate spins for this round (funds / 1000)
-    const spinsThisRound = Math.floor(funds / 1000);
-    user.spinsRemaining = spinsThisRound;
-    user.spinsDoneInRound = 0;
-    user.status = 'ready';
-    
-    log(userId, `New round: ${spinsThisRound} spins (funds: ${funds.toLocaleString()})`, 'ROUND');
+    globalSpinnerConfig.spinnerId = data.id;
+    globalSpinnerConfig.packIds = packPrizeIds;
+    globalSpinnerConfig.lastAutoFetch = new Date().toISOString();
+    await saveSpinnerConfig();
+    logActivity('system', `🎡 Spinner: ID=${data.id}, packs=[${packPrizeIds.join(',')}]`);
     return true;
 }
 
-// Process next user in the active pool
-async function processNextUser() {
-    if (isPaused || activeUserIds.length === 0) return;
-
-    // Filter out users that are not ready
-    const readyUsers = activeUserIds.filter(id => {
-        const user = userData[id];
-        return user && user.isActive && user.status === 'ready' && user.spinsRemaining > 0;
-    });
-
-    if (readyUsers.length === 0) {
-        // No ready users, try to add more from queue
-        await addUsersToActivePool();
-        return;
-    }
-
-    // Pick a random user from ready pool
-    const randomIndex = Math.floor(Math.random() * readyUsers.length);
-    const userId = readyUsers[randomIndex];
+// ============================================================
+// 🪙 TOKEN REFRESH
+// ============================================================
+async function refreshToken(userId) {
     const user = userData[userId];
+    if (!user) { logActivity(userId, 'ERROR: user not found'); return false; }
 
-    // Mark as spinning
-    user.status = 'spinning';
-    
-    // Process one spin (with atomic retry)
-    const spinResult = await processUserSpin(userId);
-    
-    if (spinResult.success) {
-        // If no spins remaining, check if user needs a new round or is done
-        if (user.spinsRemaining <= 0) {
-            log(userId, 'Round complete, claiming achievements...', 'ROUND');
-            await claimAchievements(userId);
-            
-            // Check funds for next round
-            const funds = await checkFunds(userId, false);
-            if (funds && funds >= settings.minFundsThreshold) {
-                // Start new round
-                const newSpins = Math.floor(funds / 1000);
-                user.spinsRemaining = newSpins;
-                user.spinsDoneInRound = 0;
-                user.status = 'ready';
-                log(userId, `New round started: ${newSpins} spins (funds: ${funds.toLocaleString()})`, 'ROUND');
-            } else {
-                // User is done
-                user.status = 'completed';
-                user.endTime = new Date().toISOString();
-                log(userId, `User completed (final funds: ${funds?.toLocaleString() || 0})`, 'DONE');
-                
-                // Remove from active pool
-                activeUserIds = activeUserIds.filter(id => id !== userId);
-                
-                // Add next user from queue
-                await addUsersToActivePool();
-            }
-        } else {
-            // Still has spins, mark as ready again
-            user.status = 'ready';
-        }
-    } else {
-        // Spin failed, mark as error and remove from active pool
-        user.status = 'error';
-        user.lastError = 'Spin failed after retries';
-        log(userId, 'Spin failed permanently, removing from pool', 'ERROR');
-        activeUserIds = activeUserIds.filter(id => id !== userId);
-        await addUsersToActivePool();
-    }
+    logActivity(userId, 'Starting token refresh...');
+    const res = await makeAPIRequest(BASE_URL_REF, 'POST',
+        { 'Content-Type': 'application/json' }, { refreshToken: user.refreshToken }, userId);
 
-    // Schedule next user after delay
-    if (!isPaused) {
-        if (processingTimeout) {
-            clearTimeout(processingTimeout);
+    if (res.success && res.data.data?.jwt) {
+        user.jwtToken = res.data.data.jwt;
+        user.lastRefresh = new Date().toISOString();
+        user.isActive = true;
+        if (res.data.data.refreshToken && res.data.data.refreshToken !== 'Not provided') {
+            user.refreshToken = res.data.data.refreshToken;
+            await updateUserConfig(userId, 'refreshToken', user.refreshToken);
         }
-        processingTimeout = setTimeout(processNextUser, settings.spinDelay * 1000);
+        logActivity(userId, '✅ Token refreshed');
+
+        try { await fetchAndUpdateSpinnerInfo(userId, false); }
+        catch (e) { logActivity(userId, `⚠️ Spinner auto-fetch: ${e.message}`); }
+
+        scheduleNextTokenRefresh(userId);
+        return true;
     }
+    logActivity(userId, `❌ Refresh failed: ${res.error}`);
+    user.isActive = false;
+    return false;
 }
 
-// Add users from queue to active pool
-async function addUsersToActivePool() {
-    while (activeUserIds.length < settings.maxConcurrent && userQueue.length > 0) {
-        const nextUserId = userQueue.shift();
-        const user = userData[nextUserId];
-        
-        if (!user || !user.isActive) continue;
-
-        // Initialize user for first round
-        const initialized = await initializeUserRound(nextUserId);
-        if (initialized) {
-            activeUserIds.push(nextUserId);
-            user.startTime = user.startTime || new Date().toISOString();
-            log(nextUserId, `Added to active pool`, 'QUEUE');
-        } else {
-            // User couldn't be initialized (probably below threshold)
-            user.status = 'completed';
-            user.endTime = new Date().toISOString();
-            log(nextUserId, `Skipped - below threshold`, 'QUEUE');
-        }
-    }
-}
-
-// Initialize all users (refresh tokens, check initial funds)
-async function initializeAllUsers() {
-    log('system', 'Initializing application...', 'INIT');
-    
-    // Load dynamic spinner config first
-    await loadSpinnerConfig();
-    log('system', `Spinner config: spinnerId=${globalSpinnerConfig.spinnerId}, packs=[${globalSpinnerConfig.packIds.join(', ')}]`, 'INIT');
-    
-    const success = await loadUserConfig();
-    if (!success) return false;
-    
-    log('system', 'Refreshing tokens for all users...', 'INIT');
-    
-    const userIds = Object.keys(userData);
-    for (const userId of userIds) {
+function scheduleNextTokenRefresh(userId) {
+    const user = userData[userId];
+    if (!user) return;
+    const { h, m } = parseHHMM(user.dayStart);
+    let base = utcTodayAt(h, m, 0, 0);
+    base = addMs(base, 24 * 60 * 60 * 1000);
+    const range = minutesToMs(20);
+    const randMs = Math.floor(Math.random() * (2 * range + 1)) - range;
+    const next = addMs(base, randMs);
+    const delay = Math.max(next.getTime() - Date.now(), 1000);
+    setTimeout(async () => {
+        logActivity(userId, `🔄 Daily refresh (jitter ${Math.round(randMs/60000)}m)`);
         await refreshToken(userId);
-        await checkFunds(userId, true);
-        await new Promise(resolve => setTimeout(resolve, 1000));
-    }
-    
-    // Create random queue
-    userQueue = userIds.sort(() => Math.random() - 0.5);
-    
-    log('system', `System ready. ${userIds.length} users in queue. Click Start to begin.`, 'INIT');
-    return true;
+    }, delay);
+    logActivity(userId, `⏰ Next refresh: ${next.toUTCString()}`);
 }
 
-// Start processing
-function startProcessing(newSettings) {
-    if (newSettings) {
-        if (newSettings.maxConcurrent) settings.maxConcurrent = parseInt(newSettings.maxConcurrent);
-        if (newSettings.spinDelay) settings.spinDelay = parseFloat(newSettings.spinDelay);
-        if (newSettings.minFundsThreshold) settings.minFundsThreshold = parseInt(newSettings.minFundsThreshold);
+// ============================================================
+// 💰 FUNDS / ACHIEVEMENTS / PACKS / SPINS
+// ============================================================
+async function checkFunds(userId) {
+    const user = userData[userId];
+    if (!user?.jwtToken) return null;
+    const res = await makeAPIRequest(BASE_URL_MONEY, 'GET', { 'x-user-jwt': user.jwtToken }, null, userId);
+    if (res.success && res.data.data) {
+        const { silvercoins = 0, coronas = 0, usd = '0' } = res.data.data;
+        user.lastFunds = silvercoins; user.lastCoronas = coronas; user.lastUsd = usd;
+        user.dailyFundsChecks = (user.dailyFundsChecks || 0) + 1;
+        logActivity(userId, `💰 ${silvercoins.toLocaleString()} silver / ${coronas.toLocaleString()} coronas / ${usd} USD`);
+        return { silvercoins, coronas, usd };
     }
-    
-    isPaused = false;
-    
-    if (processingTimeout) {
-        clearTimeout(processingTimeout);
-        processingTimeout = null;
+    if (res.status === 401 && await refreshToken(userId)) return checkFunds(userId);
+    logActivity(userId, `❌ Funds check: ${res.error}`);
+    return null;
+}
+
+async function claimAchievements(userId) {
+    const user = userData[userId];
+    if (!user?.jwtToken) return 0;
+    const headers = { 'x-user-jwt': user.jwtToken };
+    const url = `${BASE_URL_ACH}/${user.userId}/user`;
+    const r = await makeAPIRequest(url, 'GET', headers, null, userId);
+    if (!r.success) {
+        if (r.status === 401 && await refreshToken(userId)) return claimAchievements(userId);
+        return 0;
     }
-    
-    activeUserIds = [];
-    
-    Object.values(userData).forEach(user => {
-        if (user.status !== 'completed') {
-            user.status = 'idle';
-            user.spinsRemaining = 0;
-            user.spinsDoneInRound = 0;
-        }
+    const ids = [];
+    ['achievements','daily','weekly','monthly'].forEach(cat => {
+        (r.data.data[cat] || []).forEach(item => { if (item.progress?.claimAvailable) ids.push(item.id); });
     });
-    
-    addUsersToActivePool().then(() => {
-        log('system', `Processing started (Max: ${settings.maxConcurrent}, Delay: ${settings.spinDelay}s, Min Funds: ${settings.minFundsThreshold}, SpinnerId: ${globalSpinnerConfig.spinnerId})`, 'START');
-        
-        if (activeUserIds.length > 0) {
-            processNextUser();
-        } else {
-            log('system', 'No users available to start', 'WARN');
-        }
-    });
-}
+    if (!ids.length) { logActivity(userId, 'ℹ️ No achievements'); return 0; }
 
-// Pause processing
-function pauseProcessing() {
-    isPaused = true;
-    if (processingTimeout) {
-        clearTimeout(processingTimeout);
-        processingTimeout = null;
+    let claimed = 0;
+    for (const id of ids) {
+        const c = await makeAPIRequest(`${BASE_URL_ACH}/${id}/claim/`, 'POST', headers, null, userId);
+        if (c.success) claimed++;
+        await sleep(800);
     }
-    log('system', 'Processing paused', 'PAUSE');
+    user.achievementsClaimed += claimed;
+    logActivity(userId, `🎉 Claimed ${claimed}`);
+    return claimed;
 }
 
-// Reset everything
-function resetSystem() {
-    isPaused = false;
-    if (processingTimeout) {
-        clearTimeout(processingTimeout);
-        processingTimeout = null;
+async function openPack(userId, packId) {
+    const user = userData[userId];
+    if (!user?.jwtToken) return false;
+    const r = await makeAPIRequest(BASE_URL_OPENPACK, 'POST', { 'x-user-jwt': user.jwtToken }, { packId }, userId);
+    if (r.success) { user.packsOpened = (user.packsOpened || 0) + 1; logActivity(userId, `✅ Pack opened: ${packId}`); return true; }
+    if (r.status === 401 && await refreshToken(userId)) return openPack(userId, packId);
+    return false;
+}
+
+async function executeSpin(userId) {
+    const user = userData[userId];
+    if (!user?.jwtToken) { calculateNextSpinTime(userId); return null; }
+    if (!isWithinActiveWindow(userId)) return null;
+
+    const spinnerId = globalSpinnerConfig.spinnerId;
+    logActivity(userId, `🎰 Spin with spinner ${spinnerId}`);
+    try {
+        const headers = { 'x-user-jwt': user.jwtToken, 'Content-Type': 'application/json' };
+        const r = await makeAPIRequest(BASE_URL_SPRAY, 'POST', headers, { spinnerId }, userId);
+        if (r.success) {
+            const data = r.data.data;
+            user.spinCount++;
+            if (globalSpinnerConfig.packIds.includes(data.id) && data.packs?.length > 0) {
+                await openPack(userId, data.packs[0].id);
+            } else {
+                logActivity(userId, `🎰 Prize ID=${data.id}`);
+            }
+        } else if (r.status === 401) await refreshToken(userId);
+    } catch (e) { logActivity(userId, `❌ Spin: ${e.message}`); }
+    finally { calculateNextSpinTime(userId); }
+}
+
+function calculateNextSpinTime(userId) {
+    const user = userData[userId];
+    if (!user) return;
+    const base = user.baseInterval * 60 * 1000;
+    const r1 = user.randomScale1 * 60 * 1000, r2 = user.randomScale2 * 60 * 1000;
+    const total = base + Math.floor(Math.random() * (r2 - r1) + r1);
+    user.nextSpinTime = new Date(Date.now() + total).toISOString();
+    logActivity(userId, `⏰ Next spin in ${Math.round(total/60000)}m`);
+}
+
+function isWithinActiveWindow(userId) {
+    const user = userData[userId];
+    if (!user) return false;
+    const now = new Date();
+    if (!user._effectiveStartUTC || !user._effectiveEndUTC) {
+        const { effectiveStart, effectiveEnd, randMs } = computeEffectiveWindow(user, now);
+        user._effectiveStartUTC = effectiveStart;
+        user._effectiveEndUTC = effectiveEnd;
+        user._startJitterMin = Math.round(randMs / 60000);
     }
-    
-    Object.values(userData).forEach(user => {
-        user.totalSpinsRun = 0;
-        user.totalPacksOpened = 0;
-        user.achievementsClaimed = 0;
-        user.initialFunds = user.currentFunds;
-        user.spinsRemaining = 0;
-        user.spinsDoneInRound = 0;
-        user.status = 'idle';
-        user.lastError = null;
-        user.startTime = null;
-        user.endTime = null;
-        user.retryCount = 0;
-    });
-    
-    userQueue = Object.keys(userData).sort(() => Math.random() - 0.5);
-    activeUserIds = [];
-    
-    log('system', `System reset. ${userQueue.length} users in queue.`, 'RESET');
+    return now >= user._effectiveStartUTC && now <= user._effectiveEndUTC;
 }
 
-// Safe user data for frontend
+function timeToMinutes(t) { const [h,m] = t.split(':').map(Number); return h*60+m; }
+async function updateUserConfig(userId, field, value) {
+    try {
+        const raw = await fs.readFile(USERS_CONFIG, 'utf8');
+        const users = JSON.parse(raw);
+        const idx = users.findIndex(u => u.userId === userId);
+        if (idx !== -1) { users[idx][field] = value; await fs.writeFile(USERS_CONFIG, JSON.stringify(users, null, 2)); }
+    } catch (e) { console.error('updateUserConfig:', e); }
+}
+
+function logActivity(userId, message) {
+    const ts = new Date().toISOString();
+    const e = { timestamp: ts, userId, message };
+    activityLogs.unshift(e); activityLogs = activityLogs.slice(0, 1000);
+    if (userData[userId]) { userData[userId].logs.unshift(e); userData[userId].logs = userData[userId].logs.slice(0, 200); }
+    console.log(`[${ts}] User ${userId}: ${message}`);
+}
+
+// ============================================================
+// 🕒 TIME / SERIALIZATION HELPERS
+// ============================================================
+function utcTodayAt(h, m, s = 0, ms = 0) { const d = new Date(); d.setUTCHours(h, m, s, ms); return d; }
+function addMs(d, ms) { return new Date(d.getTime() + ms); }
+function minutesToMs(m) { return m * 60 * 1000; }
+function parseHHMM(s) { const [h, m] = s.split(':').map(Number); return { h, m }; }
+function toISOStringOrNull(v) { if (!v) return null; try { const d = new Date(v); return isNaN(d) ? null : d.toISOString(); } catch { return null; } }
+
 function safeUsersSnapshot() {
     const out = {};
     for (const [id, u] of Object.entries(userData)) {
-        out[id] = {
-            userId: u.userId,
-            nick: u.nick,
-            jwtToken: u.jwtToken || 'No token',
-            isActive: u.isActive,
-            status: u.status || 'idle',
-            totalSpinsRun: u.totalSpinsRun || 0,
-            totalPacksOpened: u.totalPacksOpened || 0,
-            initialFunds: u.initialFunds || 0,
-            currentFunds: u.currentFunds || 0,
-            spinsRemaining: u.spinsRemaining || 0,
-            spinsDoneInRound: u.spinsDoneInRound || 0,
-            achievementsClaimed: u.achievementsClaimed || 0,
-            lastError: u.lastError,
-            startTime: u.startTime,
-            endTime: u.endTime
-        };
+        const { _achTimers, _dailyRolloverTimer, _listerTimer, ...rest } = u;
+        out[id] = { ...rest, _effectiveStartUTC: toISOStringOrNull(u._effectiveStartUTC), _effectiveEndUTC: toISOStringOrNull(u._effectiveEndUTC) };
     }
     return out;
 }
 
-// Middleware
-app.use(express.json());
-app.use(express.static('public'));
-
-// API Routes
-app.get('/api/users', (req, res) => {
-    res.json(safeUsersSnapshot());
-});
-
-app.get('/api/debug-logs', (req, res) => {
-    res.json(debugLogs.slice(0, 100));
-});
-
-app.get('/api/system-state', (req, res) => {
-    res.json({
-        settings,
-        isPaused,
-        activeCount: activeUserIds.length,
-        queueLength: userQueue.length,
-        totalUsers: Object.keys(userData).length,
-        spinnerConfig: globalSpinnerConfig
+function ensureTimerHolders(user) {
+    ['_achTimers', '_dailyRolloverTimer', '_listerTimer'].forEach(name => {
+        const d = Object.getOwnPropertyDescriptor(user, name);
+        if (!d || d.enumerable) {
+            Object.defineProperty(user, name, {
+                value: name === '_achTimers' ? [] : null,
+                writable: true, configurable: true, enumerable: false,
+            });
+        }
     });
-});
+}
 
-// ─── SPINNER CONFIG ENDPOINTS ───
-app.get('/api/spinner-config', (req, res) => {
-    res.json(globalSpinnerConfig);
-});
+function computeEffectiveWindow(user, now = new Date()) {
+    const { h: sh, m: sm } = parseHHMM(user.dayStart);
+    const { h: eh, m: em } = parseHHMM(user.dayEnd);
+    let baseStart = utcTodayAt(sh, sm), baseEnd = utcTodayAt(eh, em);
+    if (baseEnd <= baseStart) baseEnd = addMs(baseEnd, 24*60*60*1000);
+    if (now > baseEnd) { baseStart = addMs(baseStart, 24*60*60*1000); baseEnd = addMs(baseEnd, 24*60*60*1000); }
+    const range = minutesToMs(20);
+    const randMs = Math.floor(Math.random() * (2*range + 1)) - range;
+    return { effectiveStart: addMs(baseStart, randMs), effectiveEnd: baseEnd, randMs };
+}
 
+function clearAchievementTimers(userId) {
+    const user = userData[userId];
+    if (!user) return;
+    ensureTimerHolders(user);
+    if (Array.isArray(user._achTimers)) user._achTimers.forEach(t => clearTimeout(t));
+    Object.defineProperty(user, '_achTimers', { value: [], writable: true, configurable: true, enumerable: false });
+    if (user._dailyRolloverTimer) clearTimeout(user._dailyRolloverTimer);
+    Object.defineProperty(user, '_dailyRolloverTimer', { value: null, writable: true, configurable: true, enumerable: false });
+    if (user._listerTimer) clearTimeout(user._listerTimer);
+    Object.defineProperty(user, '_listerTimer', { value: null, writable: true, configurable: true, enumerable: false });
+}
+
+// ============================================================
+// 📅 DAILY PLAN
+// ============================================================
+function scheduleDailyPlan(userId) {
+    const user = userData[userId];
+    if (!user) return;
+    ensureTimerHolders(user);
+    clearAchievementTimers(userId);
+
+    const now = new Date();
+    const { effectiveStart, effectiveEnd, randMs } = computeEffectiveWindow(user, now);
+    user._effectiveStartUTC = effectiveStart;
+    user._effectiveEndUTC = effectiveEnd;
+    user._startJitterMin = Math.round(randMs / 60000);
+
+    logActivity(userId, `📅 Plan: start=${effectiveStart.toUTCString()} (jitter ${user._startJitterMin}m), end=${effectiveEnd.toUTCString()}`);
+
+    const claim1 = addMs(effectiveStart, minutesToMs(35));
+    const claim2 = addMs(claim1, minutesToMs(8 * 60));
+    const claim3 = addMs(effectiveEnd, -minutesToMs(25));
+
+    const scheduleClaim = (when, label) => {
+        const delay = when.getTime() - Date.now();
+        if (delay <= 0) { logActivity(userId, `⏭ ${label} skipped`); return; }
+        const t = setTimeout(async () => {
+            try {
+                if (user.isActive) { logActivity(userId, `🏁 ${label}`); await claimAchievements(userId); }
+                else logActivity(userId, `⏸ ${label} skipped`);
+            } catch (e) { logActivity(userId, `⚠️ ${label} err: ${e.message}`); }
+        }, delay);
+        user._achTimers.push(t);
+        logActivity(userId, `⏰ ${label} at ${when.toUTCString()}`);
+    };
+    scheduleClaim(claim1, 'Ach #1');
+    scheduleClaim(claim2, 'Ach #2');
+    scheduleClaim(claim3, 'Ach #3');
+
+    // Lister
+    const listerJitterMin = Number(user.listerJitter) || 150;
+    const listerAt = addMs(effectiveStart, minutesToMs(listerJitterMin));
+    const listerDelay = listerAt.getTime() - Date.now();
+    if (listerDelay > 0) {
+        user._listerTimer = setTimeout(async () => {
+            logActivity(userId, `📋 Daily lister firing`);
+            if (user.isActive && user.jwtToken) {
+                try { await scanAndListCards(userId); }
+                catch (e) { logActivity(userId, `❌ Lister err: ${e.message}`); }
+            }
+        }, listerDelay);
+        user.nextListerTime = listerAt.toISOString();
+        logActivity(userId, `⏰ Lister at ${listerAt.toUTCString()} (+${listerJitterMin}m)`);
+    } else {
+        user.nextListerTime = null;
+        logActivity(userId, `⏭ Lister skipped (past)`);
+    }
+
+    const rolloverAt = addMs(effectiveEnd, minutesToMs(2));
+    user._dailyRolloverTimer = setTimeout(() => {
+        logActivity(userId, '🔁 Rollover');
+        scheduleDailyPlan(userId);
+    }, Math.max(rolloverAt.getTime() - Date.now(), 1000));
+}
+
+function scheduleDailyPlanForAllUsers() {
+    logActivity('system', '🗓️ Scheduling all daily plans');
+    Object.keys(userData).forEach(scheduleDailyPlan);
+}
+
+// ============================================================
+// 📋 SCAN + LIST
+// ============================================================
+async function fetchMarketTemplatesForCollection(userId, headers, collectionId) {
+    const out = {};
+    let page = 1;
+    while (page <= 20) {
+        const url = `${BASE_URL_MARKET}/market/templates?type=card&page=${page}&categoryId=1&collectionIds=${collectionId}`;
+        const r = await makeAPIRequest(url, 'GET', headers, null, userId);
+        if (!r.success || !r.data?.data) break;
+        const tpl = r.data.data.templates || [];
+        for (const t of tpl) {
+            const cardT = t.cardTemplate;
+            if (!cardT?.id) continue;
+            out[cardT.id] = {
+                minted: Number(cardT.minted) > 0 ? Number(cardT.minted) : null,
+                inCirculation: Number(cardT.inCirculation) > 0 ? Number(cardT.inCirculation) : null,
+            };
+        }
+        if (tpl.length < 40) break;
+        page++;
+        await sleep(400);
+    }
+    return out;
+}
+
+async function scanUserCards(userId) {
+    const user = userData[userId];
+    if (!user?.jwtToken) return [];
+
+    const headers = { 'Content-Type': 'application/json', 'x-user-jwt': user.jwtToken };
+    const collected = [];
+
+    const summaryUrl = `${BASE_URL_COLLECTIONS}/collections/users/${user.userId}/user-summary?categoryId=1&seasons=2026`;
+    const summary = await makeAPIRequest(summaryUrl, 'GET', headers, null, userId);
+    if (!summary.success || !Array.isArray(summary.data?.data)) {
+        logActivity(userId, `⚠️ Scan: no collections`);
+        return [];
+    }
+
+    const collections = [];
+    for (const row of summary.data.data) {
+        if (!row || row.count === 0) continue;
+        const coll = row.collection;
+        if (!coll) continue;
+        if (coll.properties?.tiers?.includes('Loadout')) continue;
+        if (DEFAULT_EXCLUDED_COLLECTIONS.has(coll.id)) continue;
+        const type = coll.properties?.entity_types?.[0] || 'card';
+        if (type !== 'card') continue;
+        if (!collections.some(c => c.id === coll.id)) collections.push({ id: coll.id });
+    }
+    logActivity(userId, `🔍 Scan: ${collections.length} collections`);
+
+    for (const coll of collections) {
+        if (!user.isActive) break;
+
+        const marketTpl = await fetchMarketTemplatesForCollection(userId, headers, coll.id);
+
+        const itemsUrl = `${BASE_URL_COLLECTIONS}/collections/${coll.id}/users/${user.userId}/owned2`;
+        const items = await makeAPIRequest(itemsUrl, 'GET', headers, null, userId);
+        if (!items.success) { logActivity(userId, `⚠️ Items fail coll ${coll.id}`); continue; }
+
+        const cards = items.data?.data?.cards || [];
+        for (const item of cards) {
+            if (item.status !== 'available') continue;
+            if (!item.id || item.mintNumber == null) continue;
+
+            const templateId = item.cardTemplateId || null;
+            const mkt = templateId != null ? marketTpl[templateId] : null;
+            const minted = mkt?.minted || null;
+            const rating = Number(item.rating) || 0;
+
+            collected.push({
+                id: item.id,
+                mintNumber: Number(item.mintNumber) || 0,
+                rating,
+                templateId,
+                collectionId: coll.id,
+                minted,
+            });
+
+            if (templateId && minted) {
+                recordTemplateCirculation(templateId, minted);
+                mergeCollectionObservation(coll.id, minted, rating);
+            }
+        }
+    }
+
+    const seen = new Set();
+    const unique = [];
+    for (const it of collected) { if (!seen.has(it.id)) { seen.add(it.id); unique.push(it); } }
+    logActivity(userId, `🔍 Scan done: ${unique.length} cards`);
+    return unique;
+}
+
+async function listCardOnMarket(userId, cardId, price) {
+    const user = userData[userId];
+    if (!user?.jwtToken) return false;
+    const r = await makeAPIRequest(`${BASE_URL_MARKET}/market/list`, 'POST',
+        { 'Content-Type': 'application/json', 'x-user-jwt': user.jwtToken },
+        { id: cardId, type: 'card', price }, userId);
+    return r.success;
+}
+
+async function scanAndListCards(userId) {
+    const user = userData[userId];
+    if (!user?.jwtToken) { logActivity(userId, '❌ no JWT'); return { scanned: 0, listed: 0, failed: 0 }; }
+
+    logActivity(userId, '🔍 Scan+list start');
+    const cards = await scanUserCards(userId);
+    await saveCirculationCache();
+    if (!cards.length) { logActivity(userId, 'ℹ️ Nothing to list'); return { scanned: 0, listed: 0, failed: 0 }; }
+
+    const aggression = getUserAggression(user);
+    const delay = Math.max(Number(globalListingConfig.delayMs) || 2400, 100);
+    const period = new Date().toISOString().slice(0, 10);
+    let listed = 0, failed = 0;
+
+    for (let i = 0; i < cards.length; i++) {
+        if (!user.isActive) { logActivity(userId, '⏸ Inactive mid-list'); break; }
+        const card = cards[i];
+        const info = calculateListingPrice(card, userId, { aggression, pricingPeriod: period });
+        logActivity(userId,
+            `💵 [${i+1}/${cards.length}] Card ${card.id} M=${card.mintNumber} R=${card.rating.toFixed(2)} ` +
+            `→ ${info.price.toFixed(2)} ` +
+            `(tier=${info.tier}, CL=${info.circulationUsed}/${info.circulationSource}, ` +
+            `base=${info.basePrice.toFixed(2)}, RM=${info.randomValue.toFixed(2)}, A=${aggression})`);
+
+        const ok = await listCardOnMarket(userId, card.id, info.price);
+        if (ok) listed++; else failed++;
+        if (i < cards.length - 1) await sleep(delay);
+    }
+    logActivity(userId, `📋 Listed ${listed}, failed ${failed}, of ${cards.length}`);
+    return { scanned: cards.length, listed, failed };
+}
+
+// ============================================================
+// 🔁 CONTINUOUS OPS
+// ============================================================
+function startContinuousOperations() {
+    setInterval(async () => {
+        for (const userId of Object.keys(userData)) {
+            const u = userData[userId];
+            if (!u.isActive || !isWithinActiveWindow(userId)) continue;
+            if (!u.nextSpinTime || new Date() >= new Date(u.nextSpinTime)) await executeSpin(userId);
+        }
+    }, 30000);
+
+    setInterval(async () => {
+        for (const userId of Object.keys(userData)) {
+            if (isWithinActiveWindow(userId) && userData[userId].isActive) await checkFunds(userId);
+        }
+    }, 60 * 60 * 1000);
+}
+
+function startScheduledTasks() {
+    scheduleDailyPlanForAllUsers();
+}
+
+// ============================================================
+// 🌐 API ROUTES
+// ============================================================
+app.get('/api/users', (req, res) => res.json(safeUsersSnapshot()));
+app.get('/api/activity', (req, res) => res.json(activityLogs.slice(0, parseInt(req.query.limit) || 100)));
+app.get('/api/user/:userId/activity', (req, res) => {
+    const u = userData[req.params.userId];
+    if (!u) return res.status(404).json({ error: 'not found' });
+    res.json(u.logs.slice(0, parseInt(req.query.limit) || 50));
+});
+app.get('/api/debug-logs', (req, res) => res.json(debugLogs.slice(0, parseInt(req.query.limit) || 50)));
+
+// Spinner config (global)
+app.get('/api/spinner-config', (req, res) => res.json(globalSpinnerConfig));
 app.post('/api/spinner-config', async (req, res) => {
-    const { spinnerId, packIds } = req.body;
-
-    if (spinnerId !== undefined) {
-        const parsed = parseInt(spinnerId);
-        if (isNaN(parsed) || parsed <= 0) {
-            return res.status(400).json({ success: false, error: 'spinnerId must be a positive integer' });
-        }
-        globalSpinnerConfig.spinnerId = parsed;
-    }
-
+    const { spinnerId, packIds, autoFetch } = req.body;
+    if (spinnerId !== undefined && spinnerId !== '') globalSpinnerConfig.spinnerId = parseInt(spinnerId) || globalSpinnerConfig.spinnerId;
     if (packIds !== undefined) {
-        let parsedPacks = [];
-        if (typeof packIds === 'string') {
-            parsedPacks = packIds.split(',')
-                .map(id => parseInt(id.trim()))
-                .filter(id => !isNaN(id) && id > 0);
-        } else if (Array.isArray(packIds)) {
-            parsedPacks = packIds.map(id => parseInt(id)).filter(id => !isNaN(id) && id > 0);
-        } else {
-            return res.status(400).json({ success: false, error: 'packIds must be array or comma-separated string' });
-        }
-        globalSpinnerConfig.packIds = parsedPacks;
+        if (typeof packIds === 'string') globalSpinnerConfig.packIds = packIds.split(',').map(x => parseInt(x.trim())).filter(x => !isNaN(x));
+        else if (Array.isArray(packIds)) globalSpinnerConfig.packIds = packIds.map(x => parseInt(x)).filter(x => !isNaN(x));
     }
-
-    const saved = await saveSpinnerConfig();
-    if (!saved) {
-        return res.status(500).json({ success: false, error: 'Failed to persist config to disk' });
-    }
-
-    log('system', `⚙️ Spinner config updated: spinnerId=${globalSpinnerConfig.spinnerId}, packs=[${globalSpinnerConfig.packIds.join(', ')}]`, 'CONFIG');
+    if (autoFetch !== undefined) globalSpinnerConfig.autoFetch = !!autoFetch;
+    await saveSpinnerConfig();
+    logActivity('system', `⚙️ Spinner config saved`);
     res.json({ success: true, config: globalSpinnerConfig });
 });
 
-// Control endpoints
-app.post('/api/start', (req, res) => {
-    const { maxConcurrent, spinDelay, minFundsThreshold } = req.body;
-    startProcessing({ maxConcurrent, spinDelay, minFundsThreshold });
-    res.json({ success: true });
+// Global forced spinner check (uses first user with JWT)
+app.post('/api/spinner-check', async (req, res) => {
+    let userId = req.body?.userId;
+    if (!userId) userId = Object.keys(userData).find(id => userData[id].jwtToken);
+    if (!userId) return res.status(400).json({ error: 'No user with JWT' });
+    if (!userData[userId]?.jwtToken) return res.status(400).json({ error: 'No JWT for user' });
+    const success = await fetchAndUpdateSpinnerInfo(userId, true);
+    res.json({ success, config: globalSpinnerConfig, usedUserId: userId });
 });
 
-app.post('/api/pause', (req, res) => {
-    pauseProcessing();
-    res.json({ success: true });
-});
-
-app.post('/api/reset', (req, res) => {
-    resetSystem();
-    res.json({ success: true });
-});
-
-app.post('/api/check-all-funds', async (req, res) => {
-    log('system', 'Manual check funds for all users', 'FUNDS');
-    const userIds = Object.keys(userData);
-    for (const userId of userIds) {
-        await checkFunds(userId, false);
-        await new Promise(resolve => setTimeout(resolve, 500));
-    }
-    res.json({ success: true });
-});
-
-app.post('/api/user/:userId/refresh', async (req, res) => {
+// Per-user forced spinner check
+app.post('/api/user/:userId/spinner-check', async (req, res) => {
     const userId = req.params.userId;
-    const success = await refreshToken(userId);
-    await checkFunds(userId, false);
-    res.json({ success });
+    if (!userData[userId]) return res.status(404).json({ error: 'User not found' });
+    if (!userData[userId].jwtToken) return res.status(400).json({ error: 'No JWT for user' });
+    const success = await fetchAndUpdateSpinnerInfo(userId, true);
+    res.json({ success, config: globalSpinnerConfig, usedUserId: userId });
 });
 
-app.post('/api/user/:userId/check-funds', async (req, res) => {
+// Listing config
+app.get('/api/listing-config', (req, res) => res.json(globalListingConfig));
+app.post('/api/listing-config', async (req, res) => {
+    if (req.body.delayMs !== undefined) globalListingConfig.delayMs = Math.max(parseInt(req.body.delayMs) || 2400, 100);
+    try { await fs.writeFile('listing-config.json', JSON.stringify(globalListingConfig, null, 2)); } catch {}
+    logActivity('system', `⚙️ Listing delay = ${globalListingConfig.delayMs}ms`);
+    res.json({ success: true, config: globalListingConfig });
+});
+
+// Circulation cache peek (debug)
+app.get('/api/circulation-cache', (req, res) => res.json({
+    templateCount: Object.keys(templateCirculationCache).length,
+    collectionCount: Object.keys(collectionCirculationProfiles).length,
+    collectionProfiles: collectionCirculationProfiles,
+}));
+
+// Exports
+app.get('/api/export/user-jwt', (req, res) => {
+    const out = {};
+    for (const [id, u] of Object.entries(userData)) out[id] = { userId: id, jwtToken: u.jwtToken || '' };
+    res.json(out);
+});
+app.get('/api/export/full-data', (req, res) => {
+    const out = [];
+    for (const [id, u] of Object.entries(userData)) out.push({
+        nick: u.userNick || '', userId: id,
+        funds: u.lastFunds || 0, coronas: u.lastCoronas || 0, usd: u.lastUsd || '0', jwtToken: u.jwtToken || ''
+    });
+    res.json(out);
+});
+
+// Manual triggers
+app.post('/api/user/:userId/refresh', async (req, res) => res.json({ success: await refreshToken(req.params.userId) }));
+app.post('/api/user/:userId/spin', async (req, res) => res.json({ success: !!(await executeSpin(req.params.userId)) }));
+app.post('/api/user/:userId/claim-achievements', async (req, res) => res.json({ success: true, claimed: await claimAchievements(req.params.userId) }));
+app.post('/api/user/:userId/check-funds', async (req, res) => res.json({ success: true, funds: await checkFunds(req.params.userId) }));
+app.post('/api/user/:userId/scan-list', async (req, res) => {
     const userId = req.params.userId;
-    const funds = await checkFunds(userId, false);
-    res.json({ success: funds !== null, funds });
+    if (!userData[userId]) return res.status(404).json({ error: 'User not found' });
+    if (!userData[userId].jwtToken) return res.status(400).json({ error: 'No JWT' });
+    try { res.json({ success: true, ...(await scanAndListCards(userId)) }); }
+    catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// Start server
+// ============================================================
+// 🚀 START
+// ============================================================
 app.listen(PORT, () => {
-    console.log(`Server running on http://localhost:${PORT}`);
-    initializeAllUsers();
+    console.log(`🚀 Server running on http://localhost:${PORT}`);
+    initializeApp();
 });
