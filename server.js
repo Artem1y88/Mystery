@@ -786,7 +786,7 @@ async function listCardOnMarket(userId, cardId, price) {
     if (!BASE_URL_MARKET) return false;
     const r = await makeAPIRequest(`${BASE_URL_MARKET}/market/list`, 'POST',
         { 'Content-Type': 'application/json', 'x-user-jwt': user.jwtToken },
-        { id: cardId, type: 'card', price }, userId);
+        { id: cardId, type: 'card', price: String(price) }, userId);   // ← was: price
     return r.success;
 }
 
