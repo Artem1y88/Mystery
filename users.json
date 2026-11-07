@@ -1,14 +1,14 @@
 [
   {
-    "userId": "68802",
-    "refreshToken": "eyJhbGciOiJIUzM4NCIsInR5cCI6IkpXVCJ9.eyJkYXRhIjoibFUyWWlLd0lIb3lyRzFPWkNxVS9HQT09OlZ4YVZyU0prQ0YvbmEwOWpXRXpDYW01ZGlEQlB3S3ZHWkF6ZFBjSFB0MHN6UldFT25FdWo1empnM1V1ZVUwUHpoSUN0K0tRY05QTmJLTWNZby8yZEthYVlQM2pRNVRnNTlpWWw4Y28vamFpNUx2UEFVUTYza0FlcVRLcXZBejdXNncrNll6MnJ3QVFhV3ZpR2RlcWN2SUhUd2V5Zm9oTW1UMnhTeW9xNUlzcEFmUC9kQ3RxNUhyZDZhSzdVQjZOT1BZWWs2cVNpUERQSWtVWm1PRjAwMXc9PSIsInZlcnNpb24iOjEsImlhdCI6MTc0OTU4NTg0MiwiaXNzIjoiZXBpY3MuZ2cifQ.RzeKR9UvlplC03miMfybzP6142S0G_aNuk017v83nE0_gE219j9V467MFqCTRA3d",
-    "userNick": "Aselwyn",
-    "dayStart": "7:17",
-    "dayEnd": "23:55",
-    "baseInterval": "31",
-    "randomScale1": "3",
+    "userId": "1047374",
+    "refreshToken": "eyJhbGciOiJIUzM4NCIsInR5cCI6IkpXVCJ9.eyJkYXRhIjoiNHZsV1JSaW5uL1ZTWUJZdEdCQWYwQT09Om5sL2J2ekRGa1B2QWlldngwem5peGdEMlhGNzZpSUNMNFlwcEF2NU9FRjNSTkpDZVl1aWJPbVgwRlVpOVdtL3NxS2Q4OTd4WHdyZDFiS1pjZ0czR1VpL3hXV241dDFhTTMwTjB6Y243MXFZNHEvZHF6MXFDeFJ6cy9KOUJ2Njc2",
+    "userNick": "Temp-a1b2",
+    "dayStart": "5:56",
+    "dayEnd": "22:36",
+    "baseInterval": "32",
+    "randomScale1": "1",
     "randomScale2": "11",
-	"lister-jitter": 150,
-  "aggression": 0.3
+    "lister-jitter": "425",
+    "aggression": "0.5"
   }
 ]
