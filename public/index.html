@@ -35,6 +35,8 @@
     .btn-success { background:var(--good); border-color:var(--good); color:#fff; }
     .btn-warn { background:var(--warn); border-color:var(--warn); color:#fff; }
     .btn-warn:hover { background:#b45309; color:#fff; }
+    .btn-bundle { background:#7c3aed; border-color:#7c3aed; color:#fff; }
+    .btn-bundle:hover { background:#6d28d9; color:#fff; }
     .pill { display:inline-flex; align-items:center; gap:6px; background:var(--chip);
       border:1px solid #cbd5e1; padding:6px 8px; border-radius:999px; font-size:12px; color:var(--muted); }
     .pill b { color:var(--text); font-weight:600; }
@@ -47,8 +49,11 @@
     code.time { background:#f1f5f9; padding:2px 6px; border-radius:6px; border:1px solid #cbd5e1; }
     pre.logs { font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       white-space:pre-wrap; word-break:break-word; background:#f1f5f9; border:1px solid #cbd5e1;
-      padding:10px; border-radius:10px; max-height:150px; overflow:auto; font-size:11px; margin:4px 0; }
+      padding:10px; border-radius:10px; max-height:150px; overflow:auto; font-size:11px; margin:4px 0;
+      user-select:text; }
     .token-container { grid-column: 1 / -1; margin:8px 0; }
+    .token-copy { cursor:pointer; transition:outline .15s, background .15s; }
+    .token-copy:hover { background:#e0f2fe; }
     .ok { color:var(--good); } .warn { color:var(--warn); } .bad { color:var(--bad); }
     .small { font-size:12px; }
     .config-input { padding:6px; border:1px solid #cbd5e1; border-radius:6px; font-size:12px; width:200px; }
@@ -77,6 +82,7 @@
   </header>
 
   <div class="wrap">
+    <!-- Spinner config -->
     <div class="global-config">
       <div class="config-group">
         <span class="config-label">🎰 Spinner ID:</span>
@@ -95,6 +101,7 @@
       <span id="saveIndicator" class="save-indicator" style="display:none;">✓</span>
     </div>
 
+    <!-- Listing config -->
     <div class="global-config amber">
       <div class="config-group">
         <span class="config-label">💵 Listing delay (ms):</span>
@@ -147,6 +154,17 @@
       el.className = 'copy-success' + (bad ? ' bad' : '');
       el.style.display = 'block';
       setTimeout(() => { el.style.display = 'none'; }, 2400);
+    }
+    async function copyToClipboard(text) {
+      try { await navigator.clipboard.writeText(text); return true; }
+      catch {
+        const ta = document.createElement('textarea');
+        ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+        document.body.appendChild(ta); ta.select();
+        try { document.execCommand('copy'); return true; }
+        catch { return false; }
+        finally { document.body.removeChild(ta); }
+      }
     }
 
     async function fetchUsers() { return (await fetch('/api/users')).json(); }
@@ -249,6 +267,7 @@
         'funds': 'check-funds',
         'scan-list': 'scan-list',
         'spinner-check': 'spinner-check',
+        'create-bundles': 'create-bundles',
       };
       const route = routeMap[actionType];
       if (!route) throw new Error('unknown action ' + actionType);
@@ -271,6 +290,9 @@
         const jitter = u._startJitterMin ? `${u._startJitterMin}m` : '—';
         const listerJitter = u.listerJitter != null ? `${u.listerJitter}m` : '150m';
         const agg = u.aggression != null ? u.aggression : 0;
+        const packsOpened = u.packsOpened || 0;
+        const bundlesCreated = u.bundlesCreated || 0;
+        const creatorsDone = u.bundleCreatorsDone || 0;
 
         parts.push(`
           <div class="user-card">
@@ -283,6 +305,7 @@
                 <button class="btn small" data-act="funds" data-id="${id}">Funds</button>
                 <button class="btn small btn-warn" data-act="spinner-check" data-id="${id}">🎡 Check Spinner</button>
                 <button class="btn small btn-warn" data-act="scan-list" data-id="${id}">📋 Scan & List</button>
+                <button class="btn small btn-bundle" data-act="create-bundles" data-id="${id}">💼 Create Bundles</button>
               </div>
             </div>
             <div class="kv">
@@ -295,9 +318,9 @@
               <div class="muted">Next Spin</div>
               <div><code class="time">${fmtUTC(u.nextSpinTime)}</code> ${minsFromNow(u.nextSpinTime) ? `<span class="pill">${minsFromNow(u.nextSpinTime)}</span>` : ''}</div>
 
-              <div class="muted">Next Lister</div>
-              <div><code class="time">${fmtUTC(u.nextListerTime)}</code>
-                   ${minsFromNow(u.nextListerTime) ? `<span class="pill">${minsFromNow(u.nextListerTime)}</span>` : ''}
+              <div class="muted">Next Bundle Creator</div>
+              <div><code class="time">${fmtUTC(u.nextBundleCreatorTime)}</code>
+                   ${minsFromNow(u.nextBundleCreatorTime) ? `<span class="pill">${minsFromNow(u.nextBundleCreatorTime)}</span>` : ''}
                    <span class="pill">+${listerJitter}</span></div>
 
               <div class="muted">Aggression</div>
@@ -306,18 +329,25 @@
               <div class="muted">Spins / Ach.</div>
               <div>${u.spinCount || 0} / ${u.achievementsClaimed || 0}</div>
 
+              <div class="muted">📦 Packs Opened</div>
+              <div><span class="pill"><b>${packsOpened}</b></span></div>
+
+              <div class="muted">💼 Bundles Created</div>
+              <div><span class="pill">${bundlesCreated}</span> <span class="muted small">(${creatorsDone} creator${creatorsDone === 1 ? '' : 's'} run)</span></div>
+
               <div class="muted">Funds</div>
               <div>${(u.lastFunds || 0).toLocaleString()} silver / ${(u.lastCoronas || 0).toLocaleString()} coronas / ${u.lastUsd || 0} USD</div>
 
               <div class="token-container">
-                <div class="muted small">Token</div>
-                <pre class="logs" style="font-size:8pt;">${u.jwtToken ?? 'No token'}</pre>
+                <div class="muted small">Token <span class="muted" style="font-weight:400;">(click to copy)</span></div>
+                <pre class="logs token-copy" style="font-size:8pt;" title="Click to copy JWT">${u.jwtToken ?? 'No token'}</pre>
               </div>
             </div>
           </div>`);
       });
       panel.innerHTML = parts.join('');
 
+      // Action buttons
       panel.querySelectorAll('button[data-act]').forEach(btn => {
         btn.addEventListener('click', async (e) => {
           const el = e.currentTarget;
@@ -331,6 +361,16 @@
             if (act === 'spinner-check' && res?.config) {
               showMsg(`✅ Spinner for ${id}: ID=${res.config.spinnerId}`);
               await fetchGlobalConfig();
+            } else if (act === 'create-bundles' && res) {
+              if (res.skipped) {
+                showMsg(`⚠️ ${id}: bundle creator ${res.reason || 'skipped'}`);
+              } else {
+                showMsg(
+                  `💼 ${id}: cardsListed=${res.cardsListed ?? 0}, ` +
+                  `bundlesCreated=${res.bundlesCreated ?? 0}, ` +
+                  `bundlesListed=${res.bundlesListed ?? 0}`
+                );
+              }
             }
             el.style.backgroundColor = '#16a34a'; el.style.color = '#fff';
           } catch (err) {
@@ -341,6 +381,24 @@
               el.style.backgroundColor = ''; el.style.color = ''; el.textContent = orig; el.disabled = false;
             }, 800);
             await Promise.all([loadUsers().catch(()=>{}), loadLogs().catch(()=>{})]);
+          }
+        });
+      });
+
+      // Click-to-copy JWT
+      panel.querySelectorAll('.token-copy').forEach(pre => {
+        pre.addEventListener('click', async () => {
+          const sel = window.getSelection();
+          if (sel && sel.toString().length > 0) return; // user is selecting — don't hijack
+          const text = pre.textContent.trim();
+          if (!text || text === 'No token') return;
+          const ok = await copyToClipboard(text);
+          if (ok) {
+            showMsg('📋 JWT copied');
+            pre.style.outline = '2px solid #16a34a';
+            setTimeout(() => { pre.style.outline = ''; }, 900);
+          } else {
+            showMsg('❌ copy failed', true);
           }
         });
       });
@@ -361,7 +419,9 @@
     async function loadUsers() { try { renderUsers(await fetchUsers()); } catch (e) { document.getElementById('usersPanel').innerHTML = `<span class="bad">${e.message}</span>`; } }
     async function loadLogs()  { try { renderLogs(await fetchDebugLogs(DEBUG_LIMIT)); } catch (e) { document.getElementById('logsBox').textContent = e.message; } }
 
-    document.getElementById('refreshAll').addEventListener('click', () => { loadUsers(); loadLogs(); fetchGlobalConfig(); fetchListingConfig(); });
+    document.getElementById('refreshAll').addEventListener('click', () => {
+      loadUsers(); loadLogs(); fetchGlobalConfig(); fetchListingConfig();
+    });
     document.getElementById('refreshLogs').addEventListener('click', loadLogs);
     document.getElementById('updateGlobalConfig').addEventListener('click', updateGlobalConfig);
     document.getElementById('updateListingConfig').addEventListener('click', updateListingConfig);
