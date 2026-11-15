@@ -922,7 +922,7 @@ async function createOneBundle(userId, name, cardIds) {
     if (!user?.jwtToken || !BASE_URL_MARKET) return { success: false, error: 'no jwt / no market url' };
     const headers = { 'Content-Type': 'application/json', 'x-user-jwt': user.jwtToken };
     const body = { name, cardIds };
-    const r = await makeAPIRequest(`${BASE_URL_MARKET}/bundles`, 'POST', headers, body, userId);
+    const r = await makeAPIRequest(`${BASE_URL_MARKET}/bundles/create`, 'POST', headers, body, userId);
 
     if (r.success) return { success: true, raw: r.data };
     if (r.status === 401 && await refreshToken(userId)) {
