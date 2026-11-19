@@ -37,6 +37,8 @@
     .btn-warn:hover { background:#b45309; color:#fff; }
     .btn-bundle { background:#7c3aed; border-color:#7c3aed; color:#fff; }
     .btn-bundle:hover { background:#6d28d9; color:#fff; }
+    .btn-bundle-cat73 { background:#0d9488; border-color:#0d9488; color:#fff; }
+    .btn-bundle-cat73:hover { background:#0f766e; color:#fff; }
     .pill { display:inline-flex; align-items:center; gap:6px; background:var(--chip);
       border:1px solid #cbd5e1; padding:6px 8px; border-radius:999px; font-size:12px; color:var(--muted); }
     .pill b { color:var(--text); font-weight:600; }
@@ -267,7 +269,8 @@
         'funds': 'check-funds',
         'scan-list': 'scan-list',
         'spinner-check': 'spinner-check',
-        'create-bundles': 'create-bundles',
+        'create-bundles-cat1': 'create-bundles-cat1',
+        'create-bundles-cat73': 'create-bundles-73',
       };
       const route = routeMap[actionType];
       if (!route) throw new Error('unknown action ' + actionType);
@@ -305,7 +308,8 @@
                 <button class="btn small" data-act="funds" data-id="${id}">Funds</button>
                 <button class="btn small btn-warn" data-act="spinner-check" data-id="${id}">🎡 Check Spinner</button>
                 <button class="btn small btn-warn" data-act="scan-list" data-id="${id}">📋 Scan & List</button>
-                <button class="btn small btn-bundle" data-act="create-bundles" data-id="${id}">💼 Create Bundles</button>
+                <button class="btn small btn-bundle" data-act="create-bundles-cat1" data-id="${id}">💼 Cat1 Bundles</button>
+                <button class="btn small btn-bundle-cat73" data-act="create-bundles-cat73" data-id="${id}">💼 Cat73 Bundles</button>
               </div>
             </div>
             <div class="kv">
@@ -361,12 +365,22 @@
             if (act === 'spinner-check' && res?.config) {
               showMsg(`✅ Spinner for ${id}: ID=${res.config.spinnerId}`);
               await fetchGlobalConfig();
-            } else if (act === 'create-bundles' && res) {
+            } else if (act === 'create-bundles-cat1' && res) {
               if (res.skipped) {
-                showMsg(`⚠️ ${id}: bundle creator ${res.reason || 'skipped'}`);
+                showMsg(`⚠️ ${id}: cat1 ${res.reason || 'skipped'}`);
               } else {
                 showMsg(
-                  `💼 ${id}: cardsListed=${res.cardsListed ?? 0}, ` +
+                  `💼 ${id} cat1: cardsListed=${res.cardsListed ?? 0}, ` +
+                  `bundlesCreated=${res.bundlesCreated ?? 0}, ` +
+                  `bundlesListed=${res.bundlesListed ?? 0}`
+                );
+              }
+            } else if (act === 'create-bundles-cat73' && res) {
+              if (res.skipped) {
+                showMsg(`⚠️ ${id}: cat73 ${res.reason || 'skipped'}`);
+              } else {
+                showMsg(
+                  `💼 ${id} cat73: cardsScanned=${res.cardsScanned ?? 0}, ` +
                   `bundlesCreated=${res.bundlesCreated ?? 0}, ` +
                   `bundlesListed=${res.bundlesListed ?? 0}`
                 );
@@ -389,7 +403,7 @@
       panel.querySelectorAll('.token-copy').forEach(pre => {
         pre.addEventListener('click', async () => {
           const sel = window.getSelection();
-          if (sel && sel.toString().length > 0) return; // user is selecting — don't hijack
+          if (sel && sel.toString().length > 0) return;
           const text = pre.textContent.trim();
           if (!text || text === 'No token') return;
           const ok = await copyToClipboard(text);

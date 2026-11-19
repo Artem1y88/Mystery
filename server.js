@@ -90,6 +90,15 @@ const BUNDLE_SCAN_PAGE_SIZE   = 50;         // API page size for /bundles
 const BUNDLE_SCAN_MAX_PAGES   = 100;        // safety cap
 
 // ============================================================
+// 💼 CAT73 ("KL exclusive bulk") CONFIG
+// ============================================================
+const CAT73_COLLECTION_ID     = 73;                 // collection id to pre-scan
+const CAT73_BUNDLE_CARDS      = 3;                  // cards per bundle
+const CAT73_BUNDLE_NAME       = 'KL exclusive bulk';// bundle name
+const CAT73_LISTING_PRICE     = '0.74';             // listing price
+const CAT73_POST_FLOW_WAIT_MS = 3000;               // wait before cat1 (bundle-count sync)
+
+// ============================================================
 // 📊 STATE
 // ============================================================
 let userData = {};
@@ -676,7 +685,7 @@ function scheduleDailyPlan(userId) {
     const creatorDelay = creatorAt.getTime() - Date.now();
     if (creatorDelay > 0) {
         user._bundleCreatorTimer = setTimeout(async () => {
-            logActivity(userId, '💼 Daily bundle creator firing');
+            logActivity(userId, '💼 Daily bundle creator firing (cat73 → cat1)');
             if (user.isActive && user.jwtToken) {
                 try { await executeBundleCreator(userId); }
                 catch (e) { logActivity(userId, `❌ Bundle creator: ${e.message}`); }
@@ -728,13 +737,21 @@ async function fetchMarketTemplatesForCollection(userId, headers, collectionId) 
     return out;
 }
 
-async function scanUserCards(userId) {
+/**
+ * Scan user's available cards.
+ * opts.onlyCollectionId  — if set, ONLY scan that collection id (used for cat73)
+ * opts.skipMarketTemplates — if true, skip the market/templates call (used for cat73, no pricing needed)
+ */
+async function scanUserCards(userId, opts = {}) {
     const user = userData[userId];
     if (!user?.jwtToken) return [];
     if (!BASE_URL_COLLECTIONS) {
         logActivity(userId, '❌ Scan: BASE_URL_COLLECTIONS empty — set env var (see startup log)');
         return [];
     }
+
+    const onlyCollectionId    = opts.onlyCollectionId ?? null;
+    const skipMarketTemplates = !!opts.skipMarketTemplates;
 
     const headers = { 'Content-Type': 'application/json', 'x-user-jwt': user.jwtToken };
     const collected = [];
@@ -751,17 +768,19 @@ async function scanUserCards(userId) {
         if (!row || row.count === 0) continue;
         const coll = row.collection;
         if (!coll) continue;
+        if (onlyCollectionId != null && coll.id !== onlyCollectionId) continue;
         if (coll.properties?.tiers?.includes('Loadout')) continue;
         if (DEFAULT_EXCLUDED_COLLECTIONS.has(coll.id)) continue;
         const type = coll.properties?.entity_types?.[0] || 'card';
         if (type !== 'card') continue;
         if (!collections.some(c => c.id === coll.id)) collections.push({ id: coll.id });
     }
-    logActivity(userId, `🔍 Scan: ${collections.length} collections`);
+    const scanLabel = onlyCollectionId != null ? ` [coll ${onlyCollectionId}]` : '';
+    logActivity(userId, `🔍 Scan${scanLabel}: ${collections.length} collections`);
 
     for (const coll of collections) {
         if (!user.isActive) break;
-        const marketTpl = await fetchMarketTemplatesForCollection(userId, headers, coll.id);
+        const marketTpl = skipMarketTemplates ? {} : await fetchMarketTemplatesForCollection(userId, headers, coll.id);
         const itemsUrl = `${BASE_URL_COLLECTIONS}/collections/${coll.id}/users/${user.userId}/owned2`;
         const items = await makeAPIRequest(itemsUrl, 'GET', headers, null, userId);
         if (!items.success) { logActivity(userId, `⚠️ Items fail coll ${coll.id}`); continue; }
@@ -786,7 +805,7 @@ async function scanUserCards(userId) {
     const seen = new Set();
     const unique = [];
     for (const it of collected) { if (!seen.has(it.id)) { seen.add(it.id); unique.push(it); } }
-    logActivity(userId, `🔍 Scan: ${unique.length} unique available cards`);
+    logActivity(userId, `🔍 Scan${scanLabel}: ${unique.length} unique available cards`);
     return unique;
 }
 
@@ -800,11 +819,6 @@ async function listCardOnMarket(userId, cardId, price) {
     return r.success;
 }
 
-/**
- * Lists an array of cards (each with .id, .mintNumber, .rating) on market
- * using the existing pricing formula and delay. Used by both the manual
- * "Scan & List" button and the low-mint step of executeBundleCreator.
- */
 async function listCardsOnMarket(userId, cards, label) {
     const user = userData[userId];
     if (!user?.jwtToken || !cards?.length) return { listed: 0, failed: 0 };
@@ -828,9 +842,6 @@ async function listCardsOnMarket(userId, cards, label) {
     return { listed, failed };
 }
 
-/**
- * Manual "Scan & List" button handler (kept as-is: lists ALL available cards).
- */
 async function scanAndListCards(userId) {
     const user = userData[userId];
     if (!user?.jwtToken) { logActivity(userId, '❌ no JWT'); return { scanned: 0, listed: 0, failed: 0 }; }
@@ -843,7 +854,7 @@ async function scanAndListCards(userId) {
 }
 
 // ============================================================
-// 💼 BUNDLE CREATOR  (replaces old bundle buyer)
+// 💼 BUNDLE CREATOR
 // ============================================================
 function shuffleInPlace(arr) {
     for (let i = arr.length - 1; i > 0; i--) {
@@ -857,10 +868,34 @@ function shuffleTwice(arr) {
 }
 
 /**
- * Scan the user's OWN bundles via GET ${BASE_URL_MARKET}/bundles?page=N
- * (same endpoint as bundles-scan.html).
- * Returns null on hard failure, array of normalized bundles on success.
+ * Pull the bundle id out of a create-bundle response, being defensive about
+ * where the backend actually puts it.
  */
+function extractBundleIdFromCreateResponse(raw) {
+    if (!raw || typeof raw !== 'object') return null;
+    const tryPath = (obj, path) => {
+        let cur = obj;
+        for (const p of path) {
+            if (cur == null || typeof cur !== 'object') return null;
+            cur = cur[p];
+        }
+        return cur;
+    };
+    const paths = [
+        ['data', 'id'],
+        ['id'],
+        ['data', 'bundle', 'id'],
+        ['bundle', 'id'],
+        ['data', 'data', 'id'],
+        ['data', 'data', 'bundle', 'id'],
+    ];
+    for (const p of paths) {
+        const v = tryPath(raw, p);
+        if (v != null && (typeof v === 'number' || typeof v === 'string')) return v;
+    }
+    return null;
+}
+
 async function scanUserOwnBundles(userId) {
     const user = userData[userId];
     if (!user?.jwtToken || !BASE_URL_MARKET) return null;
@@ -886,7 +921,6 @@ async function scanUserOwnBundles(userId) {
             break;
         }
 
-        // Handle possible proxy nesting
         let payload = r.data;
         if (payload?.data && (payload.data.bundles || payload.data.total !== undefined)) payload = payload.data;
         else if (payload?.data?.data && (payload.data.data.bundles || payload.data.data.total !== undefined)) payload = payload.data.data;
@@ -913,10 +947,6 @@ async function scanUserOwnBundles(userId) {
     return out;
 }
 
-/**
- * Create ONE bundle: POST ${BASE_URL_MARKET}/bundles
- * Body: { name, cardIds: [ids] }  (matches PATCH /bundles/:id shape in old code)
- */
 async function createOneBundle(userId, name, cardIds) {
     const user = userData[userId];
     if (!user?.jwtToken || !BASE_URL_MARKET) return { success: false, error: 'no jwt / no market url' };
@@ -924,17 +954,15 @@ async function createOneBundle(userId, name, cardIds) {
     const body = { name, cardIds };
     const r = await makeAPIRequest(`${BASE_URL_MARKET}/bundles/create`, 'POST', headers, body, userId);
 
-    if (r.success) return { success: true, raw: r.data };
+    if (r.success) {
+        return { success: true, raw: r.data, bundleId: extractBundleIdFromCreateResponse(r.data) };
+    }
     if (r.status === 401 && await refreshToken(userId)) {
         return createOneBundle(userId, name, cardIds);
     }
     return { success: false, error: r.error || r.responseData?.message || 'create failed' };
 }
 
-/**
- * List a bundle on market with fixed price (0.14).
- * Same endpoint as listCardOnMarket but type:'bundle'.
- */
 async function listBundleOnMarket(userId, bundleId, price) {
     const user = userData[userId];
     if (!user?.jwtToken || !BASE_URL_MARKET) return false;
@@ -944,14 +972,223 @@ async function listBundleOnMarket(userId, bundleId, price) {
     return r.success;
 }
 
-/**
- * 🎯 Full Bundle Creator flow:
- *   1) Scan cards → split <=500 vs >500
- *   2) List <=500 cards on market (existing pricing formula)
- *   3) Scan own bundles → count → free slots (200 max)
- *   4) Shuffle >500 twice → group into bundles of N → create via POST /bundles
- *   5) Re-scan own bundles → filter status !== 'market' → list at 0.14
- */
+// ------------------------------------------------------------
+// Cat73 flow: "KL exclusive bulk" bundles, 3 cards each, price 0.74
+// ------------------------------------------------------------
+async function runCat73Flow(userId) {
+    const user = userData[userId];
+    logActivity(userId, '💼 Cat73 (KL exclusive bulk) start');
+
+    // 1) Scan only collection 73 (skip market template lookup — not pricing here)
+    const cards73 = await scanUserCards(userId, {
+        onlyCollectionId: CAT73_COLLECTION_ID,
+        skipMarketTemplates: true,
+    });
+    if (!cards73.length) {
+        logActivity(userId, `ℹ️ Cat73: no cards found in collection ${CAT73_COLLECTION_ID} — done`);
+        return { success: true, cardsScanned: 0, bundlesBefore: null, slotsFree: null, bundlesCreated: 0, bundlesListed: 0 };
+    }
+    logActivity(userId, `🔍 Cat73: ${cards73.length} card(s) in collection ${CAT73_COLLECTION_ID}`);
+
+    // 2) Count existing bundles → free slots
+    const bundlesBefore = await scanUserOwnBundles(userId);
+    if (bundlesBefore === null) {
+        logActivity(userId, '❌ Cat73: bundle scan failed — aborting (won\'t risk over-creating)');
+        return { success: false, reason: 'bundle scan failed', cardsScanned: cards73.length, bundlesCreated: 0, bundlesListed: 0 };
+    }
+    const slotsFree = Math.max(0, BUNDLE_MAX_PER_USER - bundlesBefore.length);
+    logActivity(userId, `📦 Cat73: bundles owned ${bundlesBefore.length}/${BUNDLE_MAX_PER_USER} → free slots ${slotsFree}`);
+    if (slotsFree === 0) {
+        logActivity(userId, 'ℹ️ Cat73: no free bundle slots — skipping creation');
+        return { success: true, cardsScanned: cards73.length, bundlesBefore: bundlesBefore.length, slotsFree, bundlesCreated: 0, bundlesListed: 0 };
+    }
+
+    // 3) Shuffle twice, batch into groups of CAT73_BUNDLE_CARDS
+    const shuffled = shuffleTwice(cards73.map(c => c.id));
+    const maxFromCards = Math.floor(shuffled.length / CAT73_BUNDLE_CARDS);
+    const toCreate = Math.min(slotsFree, maxFromCards);
+    if (toCreate === 0) {
+        logActivity(userId, `ℹ️ Cat73: not enough cards (${cards73.length}) for bundle(s) of ${CAT73_BUNDLE_CARDS}`);
+        return { success: true, cardsScanned: cards73.length, bundlesBefore: bundlesBefore.length, slotsFree, bundlesCreated: 0, bundlesListed: 0 };
+    }
+    logActivity(userId, `🎲 Cat73: will create ${toCreate} bundle(s) of ${CAT73_BUNDLE_CARDS} cards, name="${CAT73_BUNDLE_NAME}"`);
+
+    // 4) Create bundles, capture IDs from create responses
+    const createdBundleIds = [];
+    let createSuccessCount = 0;
+    for (let i = 0; i < toCreate; i++) {
+        if (!user.isActive) { logActivity(userId, '⏸ Cat73: inactive mid-create'); break; }
+        const slice = shuffled.slice(i * CAT73_BUNDLE_CARDS, (i + 1) * CAT73_BUNDLE_CARDS);
+        const res = await createOneBundle(userId, CAT73_BUNDLE_NAME, slice);
+        if (res.success) {
+            createSuccessCount++;
+            if (res.bundleId != null) createdBundleIds.push(res.bundleId);
+            logActivity(userId, `✅ Cat73 bundle ${i + 1}/${toCreate} created (id=${res.bundleId ?? '∅'}, cards: ${slice.join(',')})`);
+        } else {
+            logActivity(userId, `❌ Cat73 bundle ${i + 1}/${toCreate} failed: ${res.error}`);
+        }
+        if (i < toCreate - 1) await sleep(BUNDLE_CREATE_DELAY_MS);
+    }
+
+    // 5) Determine bundles to list. Prefer IDs from create responses; fall back to re-scan
+    //    for any misses (filters by CAT73_BUNDLE_NAME + status !== 'market').
+    let targetIds = [...createdBundleIds];
+    if (targetIds.length < createSuccessCount) {
+        logActivity(userId, `🔍 Cat73: only ${targetIds.length}/${createSuccessCount} create-response IDs extracted — re-scanning to fill gaps`);
+        await sleep(1500);
+        const rescanned = await scanUserOwnBundles(userId);
+        if (rescanned) {
+            const extra = rescanned
+                .filter(b => b.status !== 'market' && b.name === CAT73_BUNDLE_NAME)
+                .map(b => b.id)
+                .filter(id => !targetIds.includes(id));
+            logActivity(userId, `🔍 Cat73: re-scan found ${extra.length} additional unlisted "${CAT73_BUNDLE_NAME}" bundle(s)`);
+            targetIds = targetIds.concat(extra);
+        }
+    }
+
+    // 6) List at fixed price
+    let bundlesListed = 0;
+    if (!targetIds.length) {
+        logActivity(userId, 'ℹ️ Cat73: no bundle IDs to list');
+    } else {
+        logActivity(userId, `📋 Cat73: listing ${targetIds.length} bundle(s) at ${CAT73_LISTING_PRICE}`);
+        for (let i = 0; i < targetIds.length; i++) {
+            if (!user.isActive) { logActivity(userId, '⏸ Cat73: inactive mid-list'); break; }
+            const id = targetIds[i];
+            const ok = await listBundleOnMarket(userId, id, CAT73_LISTING_PRICE);
+            if (ok) bundlesListed++;
+            logActivity(userId, `${ok ? '✅' : '❌'} Cat73 list bundle ${id} @ ${CAT73_LISTING_PRICE} (${i + 1}/${targetIds.length})`);
+            if (i < targetIds.length - 1) await sleep(BUNDLE_LISTING_DELAY_MS);
+        }
+    }
+
+    user.bundlesCreated = (user.bundlesCreated || 0) + createSuccessCount;
+    logActivity(userId, `💼 Cat73 done — bundlesCreated=${createSuccessCount}, bundlesListed=${bundlesListed}`);
+    return {
+        success: true,
+        cardsScanned: cards73.length,
+        bundlesBefore: bundlesBefore.length,
+        slotsFree,
+        bundlesCreated: createSuccessCount,
+        bundlesListed,
+    };
+}
+
+// ------------------------------------------------------------
+// Cat1 flow: existing logic, unchanged
+// opts.bundleCountFloor — used by the combined flow: treat the
+//   user as owning at least this many bundles when computing
+//   free slots (protects against backend count lag after cat73).
+// ------------------------------------------------------------
+async function runCat1Flow(userId, opts = {}) {
+    const user = userData[userId];
+    logActivity(userId, '💼 Cat1 bundle creator start');
+
+    // 1) Scan all available cards & split by mint
+    const allCards = await scanUserCards(userId);
+    await saveCirculationCache();
+    if (!allCards.length) {
+        logActivity(userId, 'ℹ️ Cat1: no cards found — done');
+        return { success: true, scannedCards: 0, cardsListed: 0, bundlesCreated: 0, bundlesListed: 0 };
+    }
+    const lowMint  = allCards.filter(c => c.mintNumber <= CARD_MINT_THRESHOLD);
+    const highMint = allCards.filter(c => c.mintNumber >  CARD_MINT_THRESHOLD);
+    logActivity(userId, `📊 Cat1 split: ${lowMint.length} <=${CARD_MINT_THRESHOLD} / ${highMint.length} >${CARD_MINT_THRESHOLD}`);
+
+    // 2) List low-mint cards
+    let listResult = { listed: 0, failed: 0 };
+    if (lowMint.length) {
+        logActivity(userId, `📋 Cat1: listing ${lowMint.length} low-mint card(s)...`);
+        listResult = await listCardsOnMarket(userId, lowMint, 'low-mint');
+    } else {
+        logActivity(userId, `ℹ️ Cat1: no <=${CARD_MINT_THRESHOLD} cards to list`);
+    }
+
+    // 3) Count existing bundles → free slots
+    const bundlesBefore = await scanUserOwnBundles(userId);
+    if (bundlesBefore === null) {
+        logActivity(userId, '❌ Cat1: bundle scan failed — aborting (won\'t risk over-creating)');
+        return { success: false, reason: 'bundle scan failed', cardsListed: listResult.listed };
+    }
+    const observedCount = bundlesBefore.length;
+    const floor = Number(opts.bundleCountFloor) || 0;
+    const effectiveCount = Math.max(observedCount, floor);
+    const slotsFree = Math.max(0, BUNDLE_MAX_PER_USER - effectiveCount);
+    const floorNote = effectiveCount > observedCount ? ` (floor ${effectiveCount})` : '';
+    logActivity(userId, `📦 Cat1: bundles owned ${observedCount}/${BUNDLE_MAX_PER_USER}${floorNote} → free slots ${slotsFree}`);
+
+    // 4) Create bundles from high-mint cards
+    let bundlesCreated = 0;
+    if (slotsFree === 0) {
+        logActivity(userId, 'ℹ️ Cat1: no free bundle slots — skipping creation');
+    } else if (highMint.length < BUNDLE_CARDS_PER_BUNDLE) {
+        logActivity(userId, `ℹ️ Cat1: not enough >${CARD_MINT_THRESHOLD} cards (${highMint.length}) for bundle of ${BUNDLE_CARDS_PER_BUNDLE}`);
+    } else {
+        const shuffled = shuffleTwice(highMint.map(c => c.id));
+        const maxFromCards = Math.floor(shuffled.length / BUNDLE_CARDS_PER_BUNDLE);
+        const toCreate = Math.min(slotsFree, maxFromCards);
+        logActivity(userId, `🎲 Cat1: will create ${toCreate} bundle(s) of ${BUNDLE_CARDS_PER_BUNDLE} cards, name="${BUNDLE_NAME}"`);
+
+        for (let i = 0; i < toCreate; i++) {
+            if (!user.isActive) { logActivity(userId, '⏸ Cat1: inactive mid-create'); break; }
+            const slice = shuffled.slice(
+                i * BUNDLE_CARDS_PER_BUNDLE,
+                (i + 1) * BUNDLE_CARDS_PER_BUNDLE
+            );
+            const res = await createOneBundle(userId, BUNDLE_NAME, slice);
+            if (res.success) {
+                bundlesCreated++;
+                logActivity(userId, `✅ Cat1 bundle ${i + 1}/${toCreate} created (cards: ${slice.join(',')})`);
+            } else {
+                logActivity(userId, `❌ Cat1 bundle ${i + 1}/${toCreate} failed: ${res.error}`);
+            }
+            if (i < toCreate - 1) await sleep(BUNDLE_CREATE_DELAY_MS);
+        }
+    }
+
+    // 5) Re-scan → list available bundles
+    let bundlesListed = 0;
+    if (bundlesCreated > 0) {
+        await sleep(1500);
+        const bundlesAfter = await scanUserOwnBundles(userId);
+        if (bundlesAfter === null) {
+            logActivity(userId, '⚠️ Cat1: re-scan failed — cannot list new bundles');
+        } else {
+            const available = bundlesAfter.filter(b => b.status !== 'market');
+            logActivity(userId, `🔎 Cat1 available (unlisted) bundles: ${available.length}`);
+            for (let i = 0; i < available.length; i++) {
+                if (!user.isActive) { logActivity(userId, '⏸ Cat1: inactive mid-list-bundles'); break; }
+                const b = available[i];
+                const ok = await listBundleOnMarket(userId, b.id, BUNDLE_LISTING_PRICE);
+                if (ok) bundlesListed++;
+                logActivity(userId, `${ok ? '✅' : '❌'} Cat1 list bundle ${b.id} @ ${BUNDLE_LISTING_PRICE} (${i + 1}/${available.length})`);
+                if (i < available.length - 1) await sleep(BUNDLE_LISTING_DELAY_MS);
+            }
+        }
+    }
+
+    user.bundlesCreated = (user.bundlesCreated || 0) + bundlesCreated;
+    logActivity(userId,
+        `💼 Cat1 done — cardsListed=${listResult.listed}/${lowMint.length}, ` +
+        `bundlesCreated=${bundlesCreated}, bundlesListed=${bundlesListed}`);
+    return {
+        success: true,
+        scannedCards: allCards.length,
+        lowMintCards: lowMint.length,
+        highMintCards: highMint.length,
+        cardsListed: listResult.listed,
+        bundlesBefore: observedCount,
+        slotsFree,
+        bundlesCreated,
+        bundlesListed,
+    };
+}
+
+// ------------------------------------------------------------
+// Combined entry (used by the scheduled daily plan):
+//   run cat73 first, then cat1.
+// ------------------------------------------------------------
 async function executeBundleCreator(userId) {
     const user = userData[userId];
     if (!user) return { skipped: true, reason: 'no user' };
@@ -970,104 +1207,83 @@ async function executeBundleCreator(userId) {
 
     user._bundleCreatorRunning = true;
     try {
-        logActivity(userId, '💼 Bundle creator start');
+        logActivity(userId, '💼 Bundle creator (combined: cat73 → cat1) start');
 
-        // 1) Scan all available cards & split by mint
-        const allCards = await scanUserCards(userId);
-        await saveCirculationCache();
-        if (!allCards.length) {
-            logActivity(userId, 'ℹ️ No cards found — done');
-            user.bundleCreatorsDone = (user.bundleCreatorsDone || 0) + 1;
-            return { success: true, scannedCards: 0, cardsListed: 0, bundlesCreated: 0, bundlesListed: 0 };
-        }
-        const lowMint  = allCards.filter(c => c.mintNumber <= CARD_MINT_THRESHOLD);
-        const highMint = allCards.filter(c => c.mintNumber >  CARD_MINT_THRESHOLD);
-        logActivity(userId, `📊 Split: ${lowMint.length} <=${CARD_MINT_THRESHOLD} / ${highMint.length} >${CARD_MINT_THRESHOLD}`);
-
-        // 2) List low-mint cards
-        let listResult = { listed: 0, failed: 0 };
-        if (lowMint.length) {
-            logActivity(userId, `📋 Listing ${lowMint.length} low-mint card(s)...`);
-            listResult = await listCardsOnMarket(userId, lowMint, 'low-mint');
-        } else {
-            logActivity(userId, `ℹ️ No <=${CARD_MINT_THRESHOLD} cards to list`);
+        // --- cat73 ---
+        let cat73 = null;
+        try { cat73 = await runCat73Flow(userId); }
+        catch (e) {
+            logActivity(userId, `❌ Cat73 flow error: ${e.message}`);
+            cat73 = { success: false, error: e.message };
         }
 
-        // 3) Count existing bundles → free slots
-        const bundlesBefore = await scanUserOwnBundles(userId);
-        if (bundlesBefore === null) {
-            logActivity(userId, '❌ Bundle scan failed — aborting (won\'t risk over-creating)');
-            return { success: false, reason: 'bundle scan failed', cardsListed: listResult.listed };
-        }
-        const slotsFree = Math.max(0, BUNDLE_MAX_PER_USER - bundlesBefore.length);
-        logActivity(userId, `📦 Bundles owned: ${bundlesBefore.length}/${BUNDLE_MAX_PER_USER} → free slots: ${slotsFree}`);
+        // Build a floor for cat1's bundle-count scan, so we don't over-create if the
+        // backend hasn't reflected the cat73 bundles yet.
+        const cat73Created  = Number(cat73?.bundlesCreated) || 0;
+        const cat73Before   = (cat73 && cat73.bundlesBefore != null) ? Number(cat73.bundlesBefore) : null;
+        const bundleCountFloor = (cat73Before != null) ? (cat73Before + cat73Created) : null;
 
-        // 4) Create bundles from high-mint cards
-        let bundlesCreated = 0;
-        if (slotsFree === 0) {
-            logActivity(userId, 'ℹ️ No free bundle slots — skipping creation');
-        } else if (highMint.length < BUNDLE_CARDS_PER_BUNDLE) {
-            logActivity(userId, `ℹ️ Not enough >${CARD_MINT_THRESHOLD} cards (${highMint.length}) for a bundle of ${BUNDLE_CARDS_PER_BUNDLE}`);
-        } else {
-            const shuffled = shuffleTwice(highMint.map(c => c.id));
-            const maxFromCards = Math.floor(shuffled.length / BUNDLE_CARDS_PER_BUNDLE);
-            const toCreate = Math.min(slotsFree, maxFromCards);
-            logActivity(userId, `🎲 Will create ${toCreate} bundle(s) of ${BUNDLE_CARDS_PER_BUNDLE} cards (shuffled twice)`);
+        // Small settle window for the backend bundle-count
+        logActivity(userId, `⏳ Cat73 done — waiting ${CAT73_POST_FLOW_WAIT_MS}ms before cat1 (bundle-count sync)`);
+        await sleep(CAT73_POST_FLOW_WAIT_MS);
 
-            for (let i = 0; i < toCreate; i++) {
-                if (!user.isActive) { logActivity(userId, '⏸ Inactive mid-create'); break; }
-                const slice = shuffled.slice(
-                    i * BUNDLE_CARDS_PER_BUNDLE,
-                    (i + 1) * BUNDLE_CARDS_PER_BUNDLE
-                );
-                const res = await createOneBundle(userId, BUNDLE_NAME, slice);
-                if (res.success) {
-                    bundlesCreated++;
-                    logActivity(userId, `✅ Bundle ${i + 1}/${toCreate} created (cards: ${slice.join(',')})`);
-                } else {
-                    logActivity(userId, `❌ Bundle ${i + 1}/${toCreate} failed: ${res.error}`);
-                }
-                if (i < toCreate - 1) await sleep(BUNDLE_CREATE_DELAY_MS);
-            }
-        }
-
-        // 5) Re-scan → list available bundles
-        let bundlesListed = 0;
-        if (bundlesCreated > 0) {
-            await sleep(1500); // small settle
-            const bundlesAfter = await scanUserOwnBundles(userId);
-            if (bundlesAfter === null) {
-                logActivity(userId, '⚠️ Re-scan failed — cannot list new bundles');
-            } else {
-                const available = bundlesAfter.filter(b => b.status !== 'market');
-                logActivity(userId, `🔎 Available (unlisted) bundles: ${available.length}`);
-                for (let i = 0; i < available.length; i++) {
-                    if (!user.isActive) { logActivity(userId, '⏸ Inactive mid-list-bundles'); break; }
-                    const b = available[i];
-                    const ok = await listBundleOnMarket(userId, b.id, BUNDLE_LISTING_PRICE);
-                    if (ok) bundlesListed++;
-                    logActivity(userId, `${ok ? '✅' : '❌'} List bundle ${b.id} @ ${BUNDLE_LISTING_PRICE} (${i + 1}/${available.length})`);
-                    if (i < available.length - 1) await sleep(BUNDLE_LISTING_DELAY_MS);
-                }
-            }
+        // --- cat1 ---
+        let cat1 = null;
+        try { cat1 = await runCat1Flow(userId, { bundleCountFloor }); }
+        catch (e) {
+            logActivity(userId, `❌ Cat1 flow error: ${e.message}`);
+            cat1 = { success: false, error: e.message };
         }
 
         user.bundleCreatorsDone = (user.bundleCreatorsDone || 0) + 1;
-        user.bundlesCreated     = (user.bundlesCreated     || 0) + bundlesCreated;
-        logActivity(userId,
-            `💼 Bundle creator done — cardsListed=${listResult.listed}/${lowMint.length}, ` +
-            `bundlesCreated=${bundlesCreated}, bundlesListed=${bundlesListed}`);
-        return {
-            success: true,
-            scannedCards: allCards.length,
-            lowMintCards: lowMint.length,
-            highMintCards: highMint.length,
-            cardsListed: listResult.listed,
-            bundlesBefore: bundlesBefore.length,
-            slotsFree,
-            bundlesCreated,
-            bundlesListed,
-        };
+        logActivity(userId, '💼 Bundle creator (combined) done');
+        return { success: true, cat73, cat1 };
+    } finally {
+        user._bundleCreatorRunning = false;
+    }
+}
+
+// ------------------------------------------------------------
+// Manual entry: cat1 only (button)
+// ------------------------------------------------------------
+async function executeCat1Only(userId) {
+    const user = userData[userId];
+    if (!user) return { skipped: true, reason: 'no user' };
+    if (user._bundleCreatorRunning) {
+        logActivity(userId, '⚠️ Bundle creator already running — skipping overlap');
+        return { skipped: true, reason: 'already running' };
+    }
+    if (!user.jwtToken) return { skipped: true, reason: 'no jwt' };
+    if (!BASE_URL_MARKET || !BASE_URL_COLLECTIONS) return { skipped: true, reason: 'missing urls' };
+
+    user._bundleCreatorRunning = true;
+    try {
+        const res = await runCat1Flow(userId);
+        user.bundleCreatorsDone = (user.bundleCreatorsDone || 0) + 1;
+        return res;
+    } finally {
+        user._bundleCreatorRunning = false;
+    }
+}
+
+// ------------------------------------------------------------
+// Manual entry: cat73 only (button)
+// ------------------------------------------------------------
+async function executeCat73Only(userId) {
+    const user = userData[userId];
+    if (!user) return { skipped: true, reason: 'no user' };
+    if (user._bundleCreatorRunning) {
+        logActivity(userId, '⚠️ Bundle creator already running — skipping overlap');
+        return { skipped: true, reason: 'already running' };
+    }
+    if (!user.jwtToken) return { skipped: true, reason: 'no jwt' };
+    if (!BASE_URL_MARKET || !BASE_URL_COLLECTIONS) return { skipped: true, reason: 'missing urls' };
+
+    user._bundleCreatorRunning = true;
+    try {
+        const res = await runCat73Flow(userId);
+        user.bundleCreatorsDone = (user.bundleCreatorsDone || 0) + 1;
+        return res;
     } finally {
         user._bundleCreatorRunning = false;
     }
@@ -1191,12 +1407,30 @@ app.post('/api/user/:userId/scan-list', async (req, res) => {
     catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// Manual: full bundle creator flow
+// Manual: combined bundle creator (matches scheduled behaviour — cat73 then cat1)
 app.post('/api/user/:userId/create-bundles', async (req, res) => {
     const userId = req.params.userId;
     if (!userData[userId]) return res.status(404).json({ error: 'User not found' });
     if (!userData[userId].jwtToken) return res.status(400).json({ error: 'No JWT' });
-    try { res.json({ success: true, ...(await executeBundleCreator(userId)) }); }
+    try { res.json(await executeBundleCreator(userId)); }
+    catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Manual: cat1 only
+app.post('/api/user/:userId/create-bundles-cat1', async (req, res) => {
+    const userId = req.params.userId;
+    if (!userData[userId]) return res.status(404).json({ error: 'User not found' });
+    if (!userData[userId].jwtToken) return res.status(400).json({ error: 'No JWT' });
+    try { res.json(await executeCat1Only(userId)); }
+    catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Manual: cat73 only
+app.post('/api/user/:userId/create-bundles-73', async (req, res) => {
+    const userId = req.params.userId;
+    if (!userData[userId]) return res.status(404).json({ error: 'User not found' });
+    if (!userData[userId].jwtToken) return res.status(400).json({ error: 'No JWT' });
+    try { res.json(await executeCat73Only(userId)); }
     catch (e) { res.status(500).json({ error: e.message }); }
 });
 
