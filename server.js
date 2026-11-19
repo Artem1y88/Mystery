@@ -91,8 +91,10 @@ const BUNDLE_SCAN_MAX_PAGES   = 100;        // safety cap
 
 // ============================================================
 // 💼 CAT73 ("KL exclusive bulk") CONFIG
+//    NOTE: 73 is a categoryId URL param, NOT a collection id.
+//    The scan for this category omits the "seasons" query param.
 // ============================================================
-const CAT73_COLLECTION_ID     = 73;                 // collection id to pre-scan
+const CAT73_CATEGORY_ID       = 73;                 // categoryId URL param
 const CAT73_BUNDLE_CARDS      = 3;                  // cards per bundle
 const CAT73_BUNDLE_NAME       = 'KL exclusive bulk';// bundle name
 const CAT73_LISTING_PRICE     = '0.74';             // listing price
@@ -739,8 +741,13 @@ async function fetchMarketTemplatesForCollection(userId, headers, collectionId) 
 
 /**
  * Scan user's available cards.
- * opts.onlyCollectionId  — if set, ONLY scan that collection id (used for cat73)
- * opts.skipMarketTemplates — if true, skip the market/templates call (used for cat73, no pricing needed)
+ *
+ * opts.categoryId        — categoryId URL param (default 1)
+ * opts.seasons           — seasons URL param.
+ *                          undefined  → default '2026'   (used by Cat1)
+ *                          null / ''  → omit the param  (used by Cat73)
+ * opts.skipMarketTemplates — if true, skip market/templates call
+ *                            (used by Cat73 — not pricing those cards)
  */
 async function scanUserCards(userId, opts = {}) {
     const user = userData[userId];
@@ -750,13 +757,18 @@ async function scanUserCards(userId, opts = {}) {
         return [];
     }
 
-    const onlyCollectionId    = opts.onlyCollectionId ?? null;
+    const categoryId = opts.categoryId ?? 1;
+    const seasons = (opts.seasons === undefined) ? '2026' : opts.seasons;
     const skipMarketTemplates = !!opts.skipMarketTemplates;
 
     const headers = { 'Content-Type': 'application/json', 'x-user-jwt': user.jwtToken };
     const collected = [];
 
-    const summaryUrl = `${BASE_URL_COLLECTIONS}/collections/users/${user.userId}/user-summary?categoryId=1&seasons=2026`;
+    let summaryUrl = `${BASE_URL_COLLECTIONS}/collections/users/${user.userId}/user-summary?categoryId=${categoryId}`;
+    if (seasons != null && seasons !== '') {
+        summaryUrl += `&seasons=${seasons}`;
+    }
+
     const summary = await makeAPIRequest(summaryUrl, 'GET', headers, null, userId);
     if (!summary.success || !Array.isArray(summary.data?.data)) {
         logActivity(userId, `⚠️ Scan: collections fetch failed (status=${summary.status} err=${summary.error || 'none'})`);
@@ -768,14 +780,13 @@ async function scanUserCards(userId, opts = {}) {
         if (!row || row.count === 0) continue;
         const coll = row.collection;
         if (!coll) continue;
-        if (onlyCollectionId != null && coll.id !== onlyCollectionId) continue;
         if (coll.properties?.tiers?.includes('Loadout')) continue;
         if (DEFAULT_EXCLUDED_COLLECTIONS.has(coll.id)) continue;
         const type = coll.properties?.entity_types?.[0] || 'card';
         if (type !== 'card') continue;
         if (!collections.some(c => c.id === coll.id)) collections.push({ id: coll.id });
     }
-    const scanLabel = onlyCollectionId != null ? ` [coll ${onlyCollectionId}]` : '';
+    const scanLabel = categoryId !== 1 ? ` [cat ${categoryId}]` : '';
     logActivity(userId, `🔍 Scan${scanLabel}: ${collections.length} collections`);
 
     for (const coll of collections) {
@@ -974,21 +985,23 @@ async function listBundleOnMarket(userId, bundleId, price) {
 
 // ------------------------------------------------------------
 // Cat73 flow: "KL exclusive bulk" bundles, 3 cards each, price 0.74
+// Scan hits user-summary?categoryId=73  (NO &seasons=...)
 // ------------------------------------------------------------
 async function runCat73Flow(userId) {
     const user = userData[userId];
-    logActivity(userId, '💼 Cat73 (KL exclusive bulk) start');
+    logActivity(userId, `💼 Cat73 (KL exclusive bulk, categoryId=${CAT73_CATEGORY_ID}) start`);
 
-    // 1) Scan only collection 73 (skip market template lookup — not pricing here)
+    // 1) Scan categoryId=73 (no seasons), skip market template lookup — not pricing here
     const cards73 = await scanUserCards(userId, {
-        onlyCollectionId: CAT73_COLLECTION_ID,
+        categoryId: CAT73_CATEGORY_ID,
+        seasons: null,                 // omit "&seasons=..." from the URL
         skipMarketTemplates: true,
     });
     if (!cards73.length) {
-        logActivity(userId, `ℹ️ Cat73: no cards found in collection ${CAT73_COLLECTION_ID} — done`);
+        logActivity(userId, `ℹ️ Cat73: no cards found in categoryId=${CAT73_CATEGORY_ID} — done`);
         return { success: true, cardsScanned: 0, bundlesBefore: null, slotsFree: null, bundlesCreated: 0, bundlesListed: 0 };
     }
-    logActivity(userId, `🔍 Cat73: ${cards73.length} card(s) in collection ${CAT73_COLLECTION_ID}`);
+    logActivity(userId, `🔍 Cat73: ${cards73.length} card(s) in categoryId=${CAT73_CATEGORY_ID}`);
 
     // 2) Count existing bundles → free slots
     const bundlesBefore = await scanUserOwnBundles(userId);
@@ -1076,16 +1089,16 @@ async function runCat73Flow(userId) {
 }
 
 // ------------------------------------------------------------
-// Cat1 flow: existing logic, unchanged
-// opts.bundleCountFloor — used by the combined flow: treat the
-//   user as owning at least this many bundles when computing
-//   free slots (protects against backend count lag after cat73).
+// Cat1 flow: existing logic, unchanged.
+// Scan hits user-summary?categoryId=1&seasons=2026 (defaults).
+// opts.bundleCountFloor — combined flow uses this to avoid
+//   over-creating if the backend hasn't reflected cat73 bundles yet.
 // ------------------------------------------------------------
 async function runCat1Flow(userId, opts = {}) {
     const user = userData[userId];
     logActivity(userId, '💼 Cat1 bundle creator start');
 
-    // 1) Scan all available cards & split by mint
+    // 1) Scan all available cards & split by mint (categoryId=1, seasons=2026)
     const allCards = await scanUserCards(userId);
     await saveCirculationCache();
     if (!allCards.length) {
