@@ -3,8 +3,23 @@ const cron = require('node-cron');
 const axios = require('axios');
 const fs = require('fs').promises;
 const path = require('path');
-const { HttpsProxyAgent } = require('https-proxy-agent');
-const { SocksProxyAgent } = require('socks-proxy-agent');
+
+// ============================================================
+// 🔌 PROXY DEPENDENCY LOADING (safe — never crashes the server)
+// ============================================================
+let HttpsProxyAgent = null;
+let SocksProxyAgent = null;
+let proxyDepsAvailable = false;
+try {
+    ({ HttpsProxyAgent } = require('https-proxy-agent'));
+    ({ SocksProxyAgent } = require('socks-proxy-agent'));
+    proxyDepsAvailable = true;
+    console.log('✅ Proxy dependencies loaded');
+} catch (e) {
+    console.error('❌ Proxy dependencies NOT installed:', e.message);
+    console.error('   Fix: run `npm install https-proxy-agent socks-proxy-agent` and redeploy.');
+    console.error('   Server will start WITHOUT proxy until this is fixed.');
+}
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -45,23 +60,28 @@ let PROXY_ENABLED = false;
 let proxyAgent = null;
 
 if (process.env.PROXY_ENABLED !== 'false' && PROXY_URL_RAW) {
-    try {
-        PROXY_URL = normalizeProxyUrl(PROXY_URL_RAW);
-        const isSocks = /^socks(4|5|5h)?:\/\//i.test(PROXY_URL);
-        const agentOpts = { keepAlive: true, timeout: PROXY_TIMEOUT_MS };
-        proxyAgent = isSocks
-            ? new SocksProxyAgent(PROXY_URL, agentOpts)
-            : new HttpsProxyAgent(PROXY_URL, agentOpts);
-        PROXY_ENABLED = true;
-        console.log(`🔄 ${isSocks ? 'SOCKS' : 'HTTP/HTTPS'} proxy enabled: ${redactProxyUrl(PROXY_URL)}`);
-        if (PROXY_URL !== PROXY_URL_RAW) {
-            console.log('   ℹ️ URL normalized from original (credentials re-encoded).');
+    if (!proxyDepsAvailable) {
+        console.warn('⚠️  PROXY_URL is set, but proxy packages are missing. Running WITHOUT proxy.');
+        console.warn('   Fix: npm install https-proxy-agent socks-proxy-agent, then redeploy.');
+    } else {
+        try {
+            PROXY_URL = normalizeProxyUrl(PROXY_URL_RAW);
+            const isSocks = /^socks(4|5|5h)?:\/\//i.test(PROXY_URL);
+            const agentOpts = { keepAlive: true, timeout: PROXY_TIMEOUT_MS };
+            proxyAgent = isSocks
+                ? new SocksProxyAgent(PROXY_URL, agentOpts)
+                : new HttpsProxyAgent(PROXY_URL, agentOpts);
+            PROXY_ENABLED = true;
+            console.log(`🔄 ${isSocks ? 'SOCKS' : 'HTTP/HTTPS'} proxy enabled: ${redactProxyUrl(PROXY_URL)}`);
+            if (PROXY_URL !== PROXY_URL_RAW) {
+                console.log('   ℹ️ URL normalized from original (credentials re-encoded).');
+            }
+        } catch (error) {
+            console.error('❌ Failed to create proxy agent:', error.message);
+            console.log('⚠️ Continuing without proxy...');
+            PROXY_ENABLED = false;
+            proxyAgent = null;
         }
-    } catch (error) {
-        console.error('❌ Failed to create proxy agent:', error.message);
-        console.log('⚠️ Continuing without proxy...');
-        PROXY_ENABLED = false;
-        proxyAgent = null;
     }
 } else {
     console.log('ℹ️ Proxy not configured or disabled. Using direct connections.');
@@ -551,24 +571,12 @@ async function loadUserConfig() {
 // ============================================================
 // 🔌 API REQUEST HELPER — ALL CALLS GO THROUGH PROXY, RETRY VIA PROXY
 // ============================================================
-/**
- * @param {string} url
- * @param {string} method
- * @param {object} headers
- * @param {any}    data
- * @param {string} userId
- * @param {object} options
- *   - maxRetries           default: GET→PROXY_MAX_RETRIES, others→0
- *   - baseDelayMs          default 1000
- *   - timeoutMs            default instance default (PROXY_TIMEOUT_MS)
- *   - retryOnHttpStatus    default [429, 502, 503, 504]
- */
 async function makeAPIRequest(url, method = 'GET', headers = {}, data = null, userId = 'system', options = {}) {
     const httpMethod = method.toUpperCase();
     const defaultRetries = httpMethod === 'GET' ? PROXY_MAX_RETRIES : 0;
     const maxRetries = options.maxRetries ?? defaultRetries;
     const baseDelayMs = options.baseDelayMs ?? 1000;
-    const timeoutMs = options.timeoutMs; // undefined → use instance default
+    const timeoutMs = options.timeoutMs;
     const retryOnHttpStatus = options.retryOnHttpStatus || [429, 502, 503, 504];
 
     let lastError = null;
@@ -756,7 +764,6 @@ async function claimAchievements(userId) {
 async function openPack(userId, packId) {
     const user = userData[userId];
     if (!user?.jwtToken) return false;
-    // POST — no auto-retry (opening twice would be bad)
     const r = await makeAPIRequest(BASE_URL_OPENPACK, 'POST', { 'x-user-jwt': user.jwtToken }, { packId }, userId, { maxRetries: 0 });
     if (r.success) {
         user.packsOpened = (user.packsOpened || 0) + 1;
@@ -774,7 +781,6 @@ async function executeSpin(userId) {
     logActivity(userId, `🎰 Spin with spinner ${spinnerId}`);
     try {
         const headers = { 'x-user-jwt': user.jwtToken, 'Content-Type': 'application/json' };
-        // POST — no auto-retry (spins are not idempotent)
         const r = await makeAPIRequest(BASE_URL_SPRAY, 'POST', headers, { spinnerId }, userId, { maxRetries: 0 });
         if (r.success) {
             const data = r.data.data;
@@ -1039,7 +1045,6 @@ async function listCardOnMarket(userId, cardId, price) {
     const user = userData[userId];
     if (!user?.jwtToken) return false;
     if (!BASE_URL_MARKET) return false;
-    // POST — no auto-retry (avoid duplicate listings)
     const r = await makeAPIRequest(`${BASE_URL_MARKET}/market/list`, 'POST',
         { 'Content-Type': 'application/json', 'x-user-jwt': user.jwtToken },
         { id: cardId, type: 'card', price: String(price) }, userId, { maxRetries: 0 });
@@ -1175,7 +1180,6 @@ async function createOneBundle(userId, name, cardIds) {
     if (!user?.jwtToken || !BASE_URL_MARKET) return { success: false, error: 'no jwt / no market url' };
     const headers = { 'Content-Type': 'application/json', 'x-user-jwt': user.jwtToken };
     const body = { name, cardIds };
-    // POST — no auto-retry (avoid duplicate bundles)
     const r = await makeAPIRequest(`${BASE_URL_MARKET}/bundles/create`, 'POST', headers, body, userId, { maxRetries: 0 });
 
     if (r.success) {
@@ -1190,7 +1194,6 @@ async function createOneBundle(userId, name, cardIds) {
 async function listBundleOnMarket(userId, bundleId, price) {
     const user = userData[userId];
     if (!user?.jwtToken || !BASE_URL_MARKET) return false;
-    // POST — no auto-retry (avoid duplicate listings)
     const r = await makeAPIRequest(`${BASE_URL_MARKET}/market/list`, 'POST',
         { 'Content-Type': 'application/json', 'x-user-jwt': user.jwtToken },
         { id: bundleId, type: 'bundle', price: String(price) }, userId, { maxRetries: 0 });
@@ -1505,6 +1508,23 @@ function startContinuousOperations() {
 function startScheduledTasks() { scheduleDailyPlanForAllUsers(); }
 
 // ============================================================
+// 🌐 MIDDLEWARE + STATIC (must come BEFORE routes)
+// ============================================================
+app.use(express.json());
+const PUBLIC_DIR = path.join(__dirname, 'public');
+app.use(express.static(PUBLIC_DIR));
+console.log(`📁 Serving static files from: ${PUBLIC_DIR}`);
+
+app.get('/', (req, res) => {
+    res.sendFile(path.join(PUBLIC_DIR, 'index.html'), (err) => {
+        if (err) {
+            console.error('❌ index.html not found at', path.join(PUBLIC_DIR, 'index.html'));
+            res.status(500).send('index.html missing on server — check deployment');
+        }
+    });
+});
+
+// ============================================================
 // 🌐 API ROUTES
 // ============================================================
 app.get('/api/users', (req, res) => res.json(safeUsersSnapshot()));
@@ -1523,6 +1543,7 @@ app.get('/api/proxy-status', async (req, res) => {
         url: PROXY_ENABLED ? redactProxyUrl(PROXY_URL) : null,
         timeoutMs: PROXY_TIMEOUT_MS,
         maxRetries: PROXY_MAX_RETRIES,
+        proxyDepsAvailable,
         probe,
     });
 });
