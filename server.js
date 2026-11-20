@@ -3,31 +3,174 @@ const cron = require('node-cron');
 const axios = require('axios');
 const fs = require('fs').promises;
 const path = require('path');
+const { HttpsProxyAgent } = require('https-proxy-agent');
+const { SocksProxyAgent } = require('socks-proxy-agent');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(express.json());
-app.use(express.static('public'));
+// ============================================================
+// 🌐 PROXY CONFIGURATION (STRICT — ALL API CALLS GO VIA PROXY)
+// ============================================================
+const PROXY_TIMEOUT_MS = Number(process.env.PROXY_TIMEOUT_MS) || 45000;
+const PROXY_MAX_RETRIES = Number(process.env.PROXY_MAX_RETRIES) || 2;
+
+function redactProxyUrl(raw) {
+    if (!raw) return raw;
+    return raw.replace(/:\/\/([^:/@]+):([^@]+)@/, '://$1:***@');
+}
+
+function normalizeProxyUrl(raw) {
+    if (!raw) return null;
+    try {
+        const u = new URL(raw);
+        if (u.username) {
+            try { u.username = encodeURIComponent(decodeURIComponent(u.username)); }
+            catch { u.username = encodeURIComponent(u.username); }
+        }
+        if (u.password) {
+            try { u.password = encodeURIComponent(decodeURIComponent(u.password)); }
+            catch { u.password = encodeURIComponent(u.password); }
+        }
+        return u.toString();
+    } catch (e) {
+        console.warn(`⚠️ PROXY_URL could not be parsed (${e.message}). Using raw value — if it contains unencoded '@' or ':', the proxy will fail.`);
+        return raw;
+    }
+}
+
+const PROXY_URL_RAW = process.env.PROXY_URL || null;
+let PROXY_URL = null;
+let PROXY_ENABLED = false;
+let proxyAgent = null;
+
+if (process.env.PROXY_ENABLED !== 'false' && PROXY_URL_RAW) {
+    try {
+        PROXY_URL = normalizeProxyUrl(PROXY_URL_RAW);
+        const isSocks = /^socks(4|5|5h)?:\/\//i.test(PROXY_URL);
+        const agentOpts = { keepAlive: true, timeout: PROXY_TIMEOUT_MS };
+        proxyAgent = isSocks
+            ? new SocksProxyAgent(PROXY_URL, agentOpts)
+            : new HttpsProxyAgent(PROXY_URL, agentOpts);
+        PROXY_ENABLED = true;
+        console.log(`🔄 ${isSocks ? 'SOCKS' : 'HTTP/HTTPS'} proxy enabled: ${redactProxyUrl(PROXY_URL)}`);
+        if (PROXY_URL !== PROXY_URL_RAW) {
+            console.log('   ℹ️ URL normalized from original (credentials re-encoded).');
+        }
+    } catch (error) {
+        console.error('❌ Failed to create proxy agent:', error.message);
+        console.log('⚠️ Continuing without proxy...');
+        PROXY_ENABLED = false;
+        proxyAgent = null;
+    }
+} else {
+    console.log('ℹ️ Proxy not configured or disabled. Using direct connections.');
+}
 
 // ============================================================
-// 🎯 DEBUG LOGS
+// 🌐 AXIOS — SINGLETON INSTANCE, PROXY HARD-WIRED
+//     proxy:false prevents axios from also reading HTTP(S)_PROXY from env,
+//     which is what causes the classic "double proxy hop" timeouts.
+// ============================================================
+const axiosInstance = axios.create({
+    timeout: PROXY_TIMEOUT_MS,
+    maxRedirects: 5,
+    ...(PROXY_ENABLED && proxyAgent
+        ? { httpAgent: proxyAgent, httpsAgent: proxyAgent, proxy: false }
+        : {}),
+});
+
+// ============================================================
+// 🔁 RETRY / ERROR CLASSIFICATION
+// ============================================================
+const RETRIABLE_NETWORK_CODES = new Set([
+    'ECONNRESET', 'ECONNABORTED', 'ETIMEDOUT', 'EAI_AGAIN',
+    'ENETUNREACH', 'EHOSTUNREACH', 'ENOTFOUND',
+    'ESOCKETTIMEDOUT', 'EPIPE', 'ECONNREFUSED',
+]);
+
+function getErrorCode(err) {
+    return err?.code || err?.cause?.code || null;
+}
+function isNetworkError(err) {
+    const code = getErrorCode(err);
+    if (code && RETRIABLE_NETWORK_CODES.has(code)) return true;
+    const msg = (err?.message || '').toLowerCase();
+    return (
+        msg.includes('socket hang up') ||
+        msg.includes('network error') ||
+        msg.includes('timeout') ||
+        msg.includes('timed out')
+    );
+}
+function isProxyError(err) {
+    if (!PROXY_ENABLED) return false;
+    const code = getErrorCode(err);
+    const msg = (err?.message || '').toLowerCase();
+    return (
+        msg.includes('proxy') ||
+        code === 'ECONNREFUSED' ||
+        code === 'ETIMEDOUT' ||
+        code === 'ENETUNREACH' ||
+        code === 'EHOSTUNREACH'
+    );
+}
+
+// ============================================================
+// 🎯 DEBUG LOGS (JWT + refreshToken redacted)
 // ============================================================
 const debugLogs = [];
+
+function maskToken(t) {
+    if (typeof t !== 'string' || t.length < 20) return t ? '***' : t;
+    return `${t.slice(0, 6)}…${t.slice(-6)}`;
+}
+function maskHeaders(headers) {
+    const out = {};
+    for (const [k, v] of Object.entries(headers || {})) {
+        const lk = k.toLowerCase();
+        if (lk === 'x-user-jwt' || lk === 'authorization' || lk.includes('jwt') || lk.includes('token')) {
+            out[k] = typeof v === 'string' ? maskToken(v) : '***';
+        } else {
+            out[k] = v;
+        }
+    }
+    return out;
+}
+function maskBody(body) {
+    if (!body || typeof body !== 'object') return body;
+    const out = { ...body };
+    for (const k of Object.keys(out)) {
+        if (k.toLowerCase().includes('token')) out[k] = maskToken(out[k]);
+    }
+    return out;
+}
+
 function debugLog(userId, action, url, method, headers = {}, data = null, response = null, error = null) {
+    const safeHeaders = maskHeaders(headers);
+    const safeBody = data ? maskBody(data) : null;
     const e = {
         timestamp: new Date().toISOString(), userId, action,
-        request: { url, method, headers: JSON.stringify(headers, null, 2), body: data ? JSON.stringify(data, null, 2) : null },
+        proxy: PROXY_ENABLED ? { enabled: true, url: redactProxyUrl(PROXY_URL) } : { enabled: false },
+        request: {
+            url, method,
+            headers: JSON.stringify(safeHeaders, null, 2),
+            body: safeBody ? JSON.stringify(safeBody, null, 2) : null,
+        },
         response: response ? { status: response.status, data: JSON.stringify(response.data, null, 2) } : null,
-        error: error ? { message: error.message, status: error.response?.status,
-                          data: error.response?.data ? JSON.stringify(error.response.data, null, 2) : null } : null
+        error: error ? {
+            message: error.message,
+            code: getErrorCode(error),
+            status: error.response?.status,
+            data: error.response?.data ? JSON.stringify(error.response.data, null, 2) : null,
+        } : null,
     };
     debugLogs.unshift(e);
     if (debugLogs.length > 200) debugLogs.pop();
-    console.log(`\n${'='.repeat(80)}\n🔍 [${e.timestamp}] ${userId} ${action}\n  ${method} ${url}`);
-    if (data) console.log('  BODY:', JSON.stringify(data));
+    console.log(`\n${'='.repeat(80)}\n🔍 [${e.timestamp}] ${userId} ${action}${PROXY_ENABLED ? ' (via proxy)' : ''}\n  ${method} ${url}`);
+    if (safeBody) console.log('  BODY:', JSON.stringify(safeBody));
     if (response) console.log('  ✅', response.status);
-    if (error) console.log('  ❌', error.message, error.response?.status || '');
+    if (error) console.log('  ❌', error.message, error.response?.status || '', getErrorCode(error) || '');
     console.log('='.repeat(80) + '\n');
 }
 
@@ -77,28 +220,26 @@ if (!BASE_URL_SPINNER && BASE_URL_SPRAY) {
 }
 
 // ============================================================
-// 💼 BUNDLE CREATOR CONFIG  <-- EDIT HERE if needed
+// 💼 BUNDLE CREATOR CONFIG
 // ============================================================
-const BUNDLE_CARDS_PER_BUNDLE = 4;          // cards per bundle (change if needed)
-const BUNDLE_NAME             = 'CS';       // always "CS"
-const BUNDLE_LISTING_PRICE    = '0.14';     // fixed listing price for bundles
-const BUNDLE_LISTING_DELAY_MS = 2500;       // delay between bundle listings
-const BUNDLE_CREATE_DELAY_MS  = 2000;       // delay between bundle creations
-const BUNDLE_MAX_PER_USER     = 200;        // server max bundles per user
-const CARD_MINT_THRESHOLD     = 500;        // list cards <= 500, bundle cards > 500
-const BUNDLE_SCAN_PAGE_SIZE   = 50;         // API page size for /bundles
-const BUNDLE_SCAN_MAX_PAGES   = 100;        // safety cap
+const BUNDLE_CARDS_PER_BUNDLE = 4;
+const BUNDLE_NAME             = 'CS';
+const BUNDLE_LISTING_PRICE    = '0.14';
+const BUNDLE_LISTING_DELAY_MS = 2500;
+const BUNDLE_CREATE_DELAY_MS  = 2000;
+const BUNDLE_MAX_PER_USER     = 200;
+const CARD_MINT_THRESHOLD     = 500;
+const BUNDLE_SCAN_PAGE_SIZE   = 50;
+const BUNDLE_SCAN_MAX_PAGES   = 100;
 
 // ============================================================
-// 💼 CAT73 ("KL exclusive bulk") CONFIG
-//    NOTE: 73 is a categoryId URL param, NOT a collection id.
-//    The scan for this category omits the "seasons" query param.
+// 💼 CAT73 CONFIG
 // ============================================================
-const CAT73_CATEGORY_ID       = 73;                 // categoryId URL param
-const CAT73_BUNDLE_CARDS      = 3;                  // cards per bundle
-const CAT73_BUNDLE_NAME       = 'KL exclusive bulk';// bundle name
-const CAT73_LISTING_PRICE     = '0.74';             // listing price
-const CAT73_POST_FLOW_WAIT_MS = 3000;               // wait before cat1 (bundle-count sync)
+const CAT73_CATEGORY_ID       = 73;
+const CAT73_BUNDLE_CARDS      = 3;
+const CAT73_BUNDLE_NAME       = 'KL exclusive bulk';
+const CAT73_LISTING_PRICE     = '0.74';
+const CAT73_POST_FLOW_WAIT_MS = 3000;
 
 // ============================================================
 // 📊 STATE
@@ -128,7 +269,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
 // ============================================================
-// 💵 PRICE FORMULA
+// 💵 PRICE FORMULA (unchanged)
 // ============================================================
 function mintDesirability(M, circulation) {
     const m = Math.max(1, Math.floor(M));
@@ -306,11 +447,33 @@ function calculateListingPrice(card, userId, opts = {}) {
 function getUserAggression(user) { return clamp(Number(user.aggression ?? 0), -1, 1); }
 
 // ============================================================
+// 🔎 PROXY PROBE (diagnostic)
+// ============================================================
+async function probeProxy(target = 'https://api.ipify.org?format=json') {
+    const started = Date.now();
+    try {
+        const r = await axiosInstance.get(target, { timeout: 30000 });
+        const elapsed = Date.now() - started;
+        console.log(`✅ Proxy probe OK (${elapsed}ms) — egress IP: ${r.data?.ip || 'n/a'}`);
+        return { success: true, elapsedMs: elapsed, data: r.data };
+    } catch (e) {
+        const elapsed = Date.now() - started;
+        console.warn(`⚠️ Proxy probe FAILED (${elapsed}ms): ${getErrorCode(e) || ''} ${e.message}`);
+        return {
+            success: false, elapsedMs: elapsed, error: e.message,
+            code: getErrorCode(e), isProxyError: isProxyError(e),
+        };
+    }
+}
+
+// ============================================================
 // 🚀 INIT
 // ============================================================
 async function initializeApp() {
     try {
         console.log('🚀 INITIALIZING...');
+        console.log(`🌐 Proxy Status: ${PROXY_ENABLED ? 'ENABLED' : 'DISABLED'}`);
+        if (PROXY_ENABLED) console.log(`   Proxy URL: ${redactProxyUrl(PROXY_URL)}`);
         console.log('🔧 URL Resolution:');
         console.log(`   BASE_URL_REF       = ${BASE_URL_REF || '(unset)'}`);
         console.log(`   BASE_URL_SPRAY     = ${BASE_URL_SPRAY || '(unset)'}`);
@@ -340,6 +503,9 @@ async function initializeApp() {
             const p = JSON.parse(await fs.readFile('listing-config.json', 'utf8'));
             globalListingConfig.delayMs = p.delayMs || 2400;
         } catch { await fs.writeFile('listing-config.json', JSON.stringify(globalListingConfig, null, 2)); }
+
+        // Non-blocking proxy probe (diagnostics only — never stalls init)
+        if (PROXY_ENABLED) probeProxy().catch(() => {});
 
         for (const userId of Object.keys(userData)) await refreshToken(userId);
         startImmediateOperations();
@@ -372,7 +538,6 @@ async function loadUserConfig() {
                 logs: [], isActive: false, dailyAchievementsDone: false, dailyFundsChecks: 0, packsOpened: 0,
                 aggression: u.aggression != null ? Number(u.aggression) : 0,
                 listerJitter: u.listerJitter ?? u['lister-jitter'] ?? 150,
-                // Bundle creator state
                 nextBundleCreatorTime: null,
                 bundleCreatorsDone: 0,
                 bundlesCreated: 0,
@@ -384,22 +549,83 @@ async function loadUserConfig() {
 }
 
 // ============================================================
-// 🔌 API REQUEST HELPER
+// 🔌 API REQUEST HELPER — ALL CALLS GO THROUGH PROXY, RETRY VIA PROXY
 // ============================================================
-async function makeAPIRequest(url, method = 'GET', headers = {}, data = null, userId = 'system') {
-    try {
-        debugLog(userId, 'REQ', url, method, headers, data);
-        const response = await axios({
-            method: method.toLowerCase(), url,
-            headers: { 'Content-Type': 'application/json', ...headers },
-            data, timeout: 30000,
-        });
-        debugLog(userId, 'RES', url, method, headers, data, response);
-        return { success: true, data: response.data, status: response.status };
-    } catch (error) {
-        debugLog(userId, 'ERR', url, method, headers, data, null, error);
-        return { success: false, error: error.message, status: error.response?.status, responseData: error.response?.data };
+/**
+ * @param {string} url
+ * @param {string} method
+ * @param {object} headers
+ * @param {any}    data
+ * @param {string} userId
+ * @param {object} options
+ *   - maxRetries           default: GET→PROXY_MAX_RETRIES, others→0
+ *   - baseDelayMs          default 1000
+ *   - timeoutMs            default instance default (PROXY_TIMEOUT_MS)
+ *   - retryOnHttpStatus    default [429, 502, 503, 504]
+ */
+async function makeAPIRequest(url, method = 'GET', headers = {}, data = null, userId = 'system', options = {}) {
+    const httpMethod = method.toUpperCase();
+    const defaultRetries = httpMethod === 'GET' ? PROXY_MAX_RETRIES : 0;
+    const maxRetries = options.maxRetries ?? defaultRetries;
+    const baseDelayMs = options.baseDelayMs ?? 1000;
+    const timeoutMs = options.timeoutMs; // undefined → use instance default
+    const retryOnHttpStatus = options.retryOnHttpStatus || [429, 502, 503, 504];
+
+    let lastError = null;
+
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        try {
+            debugLog(userId, attempt === 0 ? 'REQ' : `REQ_RETRY_${attempt}`, url, httpMethod, headers, data);
+
+            const config = {
+                method: httpMethod.toLowerCase(),
+                url,
+                headers: { 'Content-Type': 'application/json', ...headers },
+                data,
+            };
+            if (timeoutMs) config.timeout = timeoutMs;
+
+            const response = await axiosInstance(config);
+
+            debugLog(userId, 'RES', url, httpMethod, headers, data, response);
+            return { success: true, data: response.data, status: response.status };
+        } catch (error) {
+            lastError = error;
+            debugLog(userId, 'ERR', url, httpMethod, headers, data, null, error);
+
+            const httpStatus = error.response?.status;
+            const canRetry =
+                attempt < maxRetries &&
+                (isNetworkError(error) || (httpStatus && retryOnHttpStatus.includes(httpStatus)));
+
+            if (canRetry) {
+                const delay = Math.round(baseDelayMs * Math.pow(2, attempt) + Math.random() * 500);
+                logActivity(
+                    userId,
+                    `🔄 ${httpMethod} ${url} failed (${getErrorCode(error) || httpStatus || 'unknown'})` +
+                    `${isProxyError(error) ? ' [PROXY]' : ''}, retry ${attempt + 1}/${maxRetries} in ${delay}ms`
+                );
+                await sleep(delay);
+                continue;
+            }
+
+            return {
+                success: false,
+                error: error.message,
+                status: httpStatus,
+                responseData: error.response?.data,
+                code: getErrorCode(error),
+                isProxyError: isProxyError(error),
+            };
+        }
     }
+
+    return {
+        success: false,
+        error: lastError?.message || 'Unknown error',
+        code: getErrorCode(lastError),
+        isProxyError: isProxyError(lastError),
+    };
 }
 
 // ============================================================
@@ -425,7 +651,7 @@ async function fetchAndUpdateSpinnerInfo(userId, force = false) {
     const res = await makeAPIRequest(url, 'GET',
         { 'Content-Type': 'application/json', 'x-user-jwt': user.jwtToken }, null, userId);
     if (!res.success || !res.data?.data) {
-        logActivity('system', `❌ Spinner fetch failed: ${res.error || 'no data'}`);
+        logActivity('system', `❌ Spinner fetch failed: ${res.error || 'no data'}${res.isProxyError ? ' (PROXY)' : ''}`);
         return false;
     }
     const data = res.data.data;
@@ -465,7 +691,7 @@ async function refreshToken(userId) {
         scheduleNextTokenRefresh(userId);
         return true;
     }
-    logActivity(userId, `❌ Refresh failed: ${res.error}`);
+    logActivity(userId, `❌ Refresh failed: ${res.error}${res.isProxyError ? ' (PROXY)' : ''}`);
     user.isActive = false;
     return false;
 }
@@ -500,7 +726,7 @@ async function checkFunds(userId) {
         return { silvercoins, coronas, usd };
     }
     if (res.status === 401 && await refreshToken(userId)) return checkFunds(userId);
-    logActivity(userId, `❌ Funds: ${res.error}`);
+    logActivity(userId, `❌ Funds: ${res.error}${res.isProxyError ? ' (PROXY)' : ''}`);
     return null;
 }
 async function claimAchievements(userId) {
@@ -530,7 +756,8 @@ async function claimAchievements(userId) {
 async function openPack(userId, packId) {
     const user = userData[userId];
     if (!user?.jwtToken) return false;
-    const r = await makeAPIRequest(BASE_URL_OPENPACK, 'POST', { 'x-user-jwt': user.jwtToken }, { packId }, userId);
+    // POST — no auto-retry (opening twice would be bad)
+    const r = await makeAPIRequest(BASE_URL_OPENPACK, 'POST', { 'x-user-jwt': user.jwtToken }, { packId }, userId, { maxRetries: 0 });
     if (r.success) {
         user.packsOpened = (user.packsOpened || 0) + 1;
         logActivity(userId, `✅ Pack opened: ${packId} (total: ${user.packsOpened})`);
@@ -547,7 +774,8 @@ async function executeSpin(userId) {
     logActivity(userId, `🎰 Spin with spinner ${spinnerId}`);
     try {
         const headers = { 'x-user-jwt': user.jwtToken, 'Content-Type': 'application/json' };
-        const r = await makeAPIRequest(BASE_URL_SPRAY, 'POST', headers, { spinnerId }, userId);
+        // POST — no auto-retry (spins are not idempotent)
+        const r = await makeAPIRequest(BASE_URL_SPRAY, 'POST', headers, { spinnerId }, userId, { maxRetries: 0 });
         if (r.success) {
             const data = r.data.data;
             user.spinCount++;
@@ -662,7 +890,6 @@ function scheduleDailyPlan(userId) {
     user._startJitterMin = Math.round(randMs / 60000);
     logActivity(userId, `📅 Plan: start=${effectiveStart.toUTCString()} (jitter ${user._startJitterMin}m), end=${effectiveEnd.toUTCString()}`);
 
-    // Achievements
     const c1 = addMs(effectiveStart, minutesToMs(35));
     const c2 = addMs(c1, minutesToMs(8 * 60));
     const c3 = addMs(effectiveEnd, -minutesToMs(25));
@@ -681,7 +908,6 @@ function scheduleDailyPlan(userId) {
     scheduleClaim(c2, 'Ach #2');
     scheduleClaim(c3, 'Ach #3');
 
-    // Bundle creator (replaces old lister + buyer)
     const listerJitterMin = Number(user.listerJitter) || 150;
     const creatorAt = addMs(effectiveStart, minutesToMs(listerJitterMin));
     const creatorDelay = creatorAt.getTime() - Date.now();
@@ -700,7 +926,6 @@ function scheduleDailyPlan(userId) {
         logActivity(userId, `⏭ Bundle creator skipped (past)`);
     }
 
-    // Rollover
     const rolloverAt = addMs(effectiveEnd, minutesToMs(2));
     user._dailyRolloverTimer = setTimeout(() => {
         logActivity(userId, '🔁 Rollover');
@@ -739,16 +964,6 @@ async function fetchMarketTemplatesForCollection(userId, headers, collectionId) 
     return out;
 }
 
-/**
- * Scan user's available cards.
- *
- * opts.categoryId        — categoryId URL param (default 1)
- * opts.seasons           — seasons URL param.
- *                          undefined  → default '2026'   (used by Cat1)
- *                          null / ''  → omit the param  (used by Cat73)
- * opts.skipMarketTemplates — if true, skip market/templates call
- *                            (used by Cat73 — not pricing those cards)
- */
 async function scanUserCards(userId, opts = {}) {
     const user = userData[userId];
     if (!user?.jwtToken) return [];
@@ -824,9 +1039,10 @@ async function listCardOnMarket(userId, cardId, price) {
     const user = userData[userId];
     if (!user?.jwtToken) return false;
     if (!BASE_URL_MARKET) return false;
+    // POST — no auto-retry (avoid duplicate listings)
     const r = await makeAPIRequest(`${BASE_URL_MARKET}/market/list`, 'POST',
         { 'Content-Type': 'application/json', 'x-user-jwt': user.jwtToken },
-        { id: cardId, type: 'card', price: String(price) }, userId);
+        { id: cardId, type: 'card', price: String(price) }, userId, { maxRetries: 0 });
     return r.success;
 }
 
@@ -878,10 +1094,6 @@ function shuffleTwice(arr) {
     return shuffleInPlace(shuffleInPlace([...arr]));
 }
 
-/**
- * Pull the bundle id out of a create-bundle response, being defensive about
- * where the backend actually puts it.
- */
 function extractBundleIdFromCreateResponse(raw) {
     if (!raw || typeof raw !== 'object') return null;
     const tryPath = (obj, path) => {
@@ -963,7 +1175,8 @@ async function createOneBundle(userId, name, cardIds) {
     if (!user?.jwtToken || !BASE_URL_MARKET) return { success: false, error: 'no jwt / no market url' };
     const headers = { 'Content-Type': 'application/json', 'x-user-jwt': user.jwtToken };
     const body = { name, cardIds };
-    const r = await makeAPIRequest(`${BASE_URL_MARKET}/bundles/create`, 'POST', headers, body, userId);
+    // POST — no auto-retry (avoid duplicate bundles)
+    const r = await makeAPIRequest(`${BASE_URL_MARKET}/bundles/create`, 'POST', headers, body, userId, { maxRetries: 0 });
 
     if (r.success) {
         return { success: true, raw: r.data, bundleId: extractBundleIdFromCreateResponse(r.data) };
@@ -977,24 +1190,23 @@ async function createOneBundle(userId, name, cardIds) {
 async function listBundleOnMarket(userId, bundleId, price) {
     const user = userData[userId];
     if (!user?.jwtToken || !BASE_URL_MARKET) return false;
+    // POST — no auto-retry (avoid duplicate listings)
     const r = await makeAPIRequest(`${BASE_URL_MARKET}/market/list`, 'POST',
         { 'Content-Type': 'application/json', 'x-user-jwt': user.jwtToken },
-        { id: bundleId, type: 'bundle', price: String(price) }, userId);
+        { id: bundleId, type: 'bundle', price: String(price) }, userId, { maxRetries: 0 });
     return r.success;
 }
 
 // ------------------------------------------------------------
-// Cat73 flow: "KL exclusive bulk" bundles, 3 cards each, price 0.74
-// Scan hits user-summary?categoryId=73  (NO &seasons=...)
+// Cat73 flow
 // ------------------------------------------------------------
 async function runCat73Flow(userId) {
     const user = userData[userId];
     logActivity(userId, `💼 Cat73 (KL exclusive bulk, categoryId=${CAT73_CATEGORY_ID}) start`);
 
-    // 1) Scan categoryId=73 (no seasons), skip market template lookup — not pricing here
     const cards73 = await scanUserCards(userId, {
         categoryId: CAT73_CATEGORY_ID,
-        seasons: null,                 // omit "&seasons=..." from the URL
+        seasons: null,
         skipMarketTemplates: true,
     });
     if (!cards73.length) {
@@ -1003,7 +1215,6 @@ async function runCat73Flow(userId) {
     }
     logActivity(userId, `🔍 Cat73: ${cards73.length} card(s) in categoryId=${CAT73_CATEGORY_ID}`);
 
-    // 2) Count existing bundles → free slots
     const bundlesBefore = await scanUserOwnBundles(userId);
     if (bundlesBefore === null) {
         logActivity(userId, '❌ Cat73: bundle scan failed — aborting (won\'t risk over-creating)');
@@ -1016,7 +1227,6 @@ async function runCat73Flow(userId) {
         return { success: true, cardsScanned: cards73.length, bundlesBefore: bundlesBefore.length, slotsFree, bundlesCreated: 0, bundlesListed: 0 };
     }
 
-    // 3) Shuffle twice, batch into groups of CAT73_BUNDLE_CARDS
     const shuffled = shuffleTwice(cards73.map(c => c.id));
     const maxFromCards = Math.floor(shuffled.length / CAT73_BUNDLE_CARDS);
     const toCreate = Math.min(slotsFree, maxFromCards);
@@ -1026,7 +1236,6 @@ async function runCat73Flow(userId) {
     }
     logActivity(userId, `🎲 Cat73: will create ${toCreate} bundle(s) of ${CAT73_BUNDLE_CARDS} cards, name="${CAT73_BUNDLE_NAME}"`);
 
-    // 4) Create bundles, capture IDs from create responses
     const createdBundleIds = [];
     let createSuccessCount = 0;
     for (let i = 0; i < toCreate; i++) {
@@ -1043,8 +1252,6 @@ async function runCat73Flow(userId) {
         if (i < toCreate - 1) await sleep(BUNDLE_CREATE_DELAY_MS);
     }
 
-    // 5) Determine bundles to list. Prefer IDs from create responses; fall back to re-scan
-    //    for any misses (filters by CAT73_BUNDLE_NAME + status !== 'market').
     let targetIds = [...createdBundleIds];
     if (targetIds.length < createSuccessCount) {
         logActivity(userId, `🔍 Cat73: only ${targetIds.length}/${createSuccessCount} create-response IDs extracted — re-scanning to fill gaps`);
@@ -1060,7 +1267,6 @@ async function runCat73Flow(userId) {
         }
     }
 
-    // 6) List at fixed price
     let bundlesListed = 0;
     if (!targetIds.length) {
         logActivity(userId, 'ℹ️ Cat73: no bundle IDs to list');
@@ -1089,16 +1295,12 @@ async function runCat73Flow(userId) {
 }
 
 // ------------------------------------------------------------
-// Cat1 flow: existing logic, unchanged.
-// Scan hits user-summary?categoryId=1&seasons=2026 (defaults).
-// opts.bundleCountFloor — combined flow uses this to avoid
-//   over-creating if the backend hasn't reflected cat73 bundles yet.
+// Cat1 flow
 // ------------------------------------------------------------
 async function runCat1Flow(userId, opts = {}) {
     const user = userData[userId];
     logActivity(userId, '💼 Cat1 bundle creator start');
 
-    // 1) Scan all available cards & split by mint (categoryId=1, seasons=2026)
     const allCards = await scanUserCards(userId);
     await saveCirculationCache();
     if (!allCards.length) {
@@ -1109,7 +1311,6 @@ async function runCat1Flow(userId, opts = {}) {
     const highMint = allCards.filter(c => c.mintNumber >  CARD_MINT_THRESHOLD);
     logActivity(userId, `📊 Cat1 split: ${lowMint.length} <=${CARD_MINT_THRESHOLD} / ${highMint.length} >${CARD_MINT_THRESHOLD}`);
 
-    // 2) List low-mint cards
     let listResult = { listed: 0, failed: 0 };
     if (lowMint.length) {
         logActivity(userId, `📋 Cat1: listing ${lowMint.length} low-mint card(s)...`);
@@ -1118,7 +1319,6 @@ async function runCat1Flow(userId, opts = {}) {
         logActivity(userId, `ℹ️ Cat1: no <=${CARD_MINT_THRESHOLD} cards to list`);
     }
 
-    // 3) Count existing bundles → free slots
     const bundlesBefore = await scanUserOwnBundles(userId);
     if (bundlesBefore === null) {
         logActivity(userId, '❌ Cat1: bundle scan failed — aborting (won\'t risk over-creating)');
@@ -1131,7 +1331,6 @@ async function runCat1Flow(userId, opts = {}) {
     const floorNote = effectiveCount > observedCount ? ` (floor ${effectiveCount})` : '';
     logActivity(userId, `📦 Cat1: bundles owned ${observedCount}/${BUNDLE_MAX_PER_USER}${floorNote} → free slots ${slotsFree}`);
 
-    // 4) Create bundles from high-mint cards
     let bundlesCreated = 0;
     if (slotsFree === 0) {
         logActivity(userId, 'ℹ️ Cat1: no free bundle slots — skipping creation');
@@ -1160,7 +1359,6 @@ async function runCat1Flow(userId, opts = {}) {
         }
     }
 
-    // 5) Re-scan → list available bundles
     let bundlesListed = 0;
     if (bundlesCreated > 0) {
         await sleep(1500);
@@ -1198,10 +1396,6 @@ async function runCat1Flow(userId, opts = {}) {
     };
 }
 
-// ------------------------------------------------------------
-// Combined entry (used by the scheduled daily plan):
-//   run cat73 first, then cat1.
-// ------------------------------------------------------------
 async function executeBundleCreator(userId) {
     const user = userData[userId];
     if (!user) return { skipped: true, reason: 'no user' };
@@ -1222,7 +1416,6 @@ async function executeBundleCreator(userId) {
     try {
         logActivity(userId, '💼 Bundle creator (combined: cat73 → cat1) start');
 
-        // --- cat73 ---
         let cat73 = null;
         try { cat73 = await runCat73Flow(userId); }
         catch (e) {
@@ -1230,17 +1423,13 @@ async function executeBundleCreator(userId) {
             cat73 = { success: false, error: e.message };
         }
 
-        // Build a floor for cat1's bundle-count scan, so we don't over-create if the
-        // backend hasn't reflected the cat73 bundles yet.
         const cat73Created  = Number(cat73?.bundlesCreated) || 0;
         const cat73Before   = (cat73 && cat73.bundlesBefore != null) ? Number(cat73.bundlesBefore) : null;
         const bundleCountFloor = (cat73Before != null) ? (cat73Before + cat73Created) : null;
 
-        // Small settle window for the backend bundle-count
         logActivity(userId, `⏳ Cat73 done — waiting ${CAT73_POST_FLOW_WAIT_MS}ms before cat1 (bundle-count sync)`);
         await sleep(CAT73_POST_FLOW_WAIT_MS);
 
-        // --- cat1 ---
         let cat1 = null;
         try { cat1 = await runCat1Flow(userId, { bundleCountFloor }); }
         catch (e) {
@@ -1256,9 +1445,6 @@ async function executeBundleCreator(userId) {
     }
 }
 
-// ------------------------------------------------------------
-// Manual entry: cat1 only (button)
-// ------------------------------------------------------------
 async function executeCat1Only(userId) {
     const user = userData[userId];
     if (!user) return { skipped: true, reason: 'no user' };
@@ -1279,9 +1465,6 @@ async function executeCat1Only(userId) {
     }
 }
 
-// ------------------------------------------------------------
-// Manual entry: cat73 only (button)
-// ------------------------------------------------------------
 async function executeCat73Only(userId) {
     const user = userData[userId];
     if (!user) return { skipped: true, reason: 'no user' };
@@ -1333,6 +1516,17 @@ app.get('/api/user/:userId/activity', (req, res) => {
 });
 app.get('/api/debug-logs', (req, res) => res.json(debugLogs.slice(0, parseInt(req.query.limit) || 50)));
 
+app.get('/api/proxy-status', async (req, res) => {
+    const probe = PROXY_ENABLED ? await probeProxy() : { success: false, disabled: true };
+    res.json({
+        enabled: PROXY_ENABLED,
+        url: PROXY_ENABLED ? redactProxyUrl(PROXY_URL) : null,
+        timeoutMs: PROXY_TIMEOUT_MS,
+        maxRetries: PROXY_MAX_RETRIES,
+        probe,
+    });
+});
+
 app.get('/api/test-collections/:userId', async (req, res) => {
     const userId = req.params.userId;
     const user = userData[userId];
@@ -1344,6 +1538,7 @@ app.get('/api/test-collections/:userId', async (req, res) => {
     const url = `${BASE_URL_COLLECTIONS}/collections/users/${user.userId}/user-summary?categoryId=1&seasons=2026`;
     const result = await makeAPIRequest(url, 'GET', { 'x-user-jwt': user.jwtToken }, null, userId);
     res.json({ url, success: result.success, status: result.status, error: result.error,
+        isProxyError: result.isProxyError,
         dataPreview: result.data ? JSON.stringify(result.data).slice(0, 800) : null });
 });
 
@@ -1411,7 +1606,6 @@ app.post('/api/user/:userId/spin', async (req, res) => res.json({ success: !!(aw
 app.post('/api/user/:userId/claim-achievements', async (req, res) => res.json({ success: true, claimed: await claimAchievements(req.params.userId) }));
 app.post('/api/user/:userId/check-funds', async (req, res) => res.json({ success: true, funds: await checkFunds(req.params.userId) }));
 
-// Manual: list all available cards (kept unchanged)
 app.post('/api/user/:userId/scan-list', async (req, res) => {
     const userId = req.params.userId;
     if (!userData[userId]) return res.status(404).json({ error: 'User not found' });
@@ -1420,7 +1614,6 @@ app.post('/api/user/:userId/scan-list', async (req, res) => {
     catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// Manual: combined bundle creator (matches scheduled behaviour — cat73 then cat1)
 app.post('/api/user/:userId/create-bundles', async (req, res) => {
     const userId = req.params.userId;
     if (!userData[userId]) return res.status(404).json({ error: 'User not found' });
@@ -1429,7 +1622,6 @@ app.post('/api/user/:userId/create-bundles', async (req, res) => {
     catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// Manual: cat1 only
 app.post('/api/user/:userId/create-bundles-cat1', async (req, res) => {
     const userId = req.params.userId;
     if (!userData[userId]) return res.status(404).json({ error: 'User not found' });
@@ -1438,7 +1630,6 @@ app.post('/api/user/:userId/create-bundles-cat1', async (req, res) => {
     catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// Manual: cat73 only
 app.post('/api/user/:userId/create-bundles-73', async (req, res) => {
     const userId = req.params.userId;
     if (!userData[userId]) return res.status(404).json({ error: 'User not found' });
