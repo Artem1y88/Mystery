@@ -1,0 +1,455 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>MegaTool Dashboard</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root {
+      --bg:#f8fafc; --panel:#fff; --muted:#64748b; --text:#1e293b;
+      --accent:#0891b2; --good:#16a34a; --warn:#d97706; --bad:#dc2626; --chip:#f1f5f9;
+    }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      background: radial-gradient(1000px 600px at 100% -10%, #e2e8f0, #f8fafc 50%, #e2e8f0); color:var(--text); }
+    header { padding:20px 16px; border-bottom:1px solid #e2e8f0; background:rgba(255,255,255,.8);
+      backdrop-filter:blur(10px); display:flex; align-items:center; justify-content:space-between;
+      flex-wrap:wrap; gap:12px; box-shadow:0 1px 3px rgba(0,0,0,.05); }
+    h1 { margin:0; font-size:20px; }
+    .accent { color:var(--accent); }
+    .wrap { padding:16px; max-width:1400px; margin:0 auto; }
+    .grid { display:grid; grid-template-columns:1fr; gap:16px; }
+    @media (min-width: 900px) { .grid { grid-template-columns:2fr 1fr; } }
+    .card { background:rgba(255,255,255,.8); border:1px solid #e2e8f0; border-radius:12px;
+      overflow:hidden; box-shadow:0 1px 3px rgba(0,0,0,.05); }
+    .card h2 { font-size:16px; margin:0; padding:12px 14px; border-bottom:1px solid #e2e8f0;
+      background:rgba(241,245,249,.7); }
+    .section { padding:12px 14px; }
+    .row { display:flex; flex-wrap:wrap; gap:10px; align-items:center; }
+    .btn { background:#f1f5f9; border:1px solid #cbd5e1; color:var(--text); padding:8px 12px;
+      border-radius:8px; cursor:pointer; transition:all .15s; }
+    .btn:hover { border-color:var(--accent); color:var(--accent); background:#f0fdff; }
+    .btn.small { padding:6px 10px; font-size:12px; }
+    .btn-primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+    .btn-primary:hover { background:#0c7a9c; color:#fff; }
+    .btn-success { background:var(--good); border-color:var(--good); color:#fff; }
+    .btn-warn { background:var(--warn); border-color:var(--warn); color:#fff; }
+    .btn-warn:hover { background:#b45309; color:#fff; }
+    .btn-bundle { background:#7c3aed; border-color:#7c3aed; color:#fff; }
+    .btn-bundle:hover { background:#6d28d9; color:#fff; }
+    .btn-bundle-cat73 { background:#0d9488; border-color:#0d9488; color:#fff; }
+    .btn-bundle-cat73:hover { background:#0f766e; color:#fff; }
+    .pill { display:inline-flex; align-items:center; gap:6px; background:var(--chip);
+      border:1px solid #cbd5e1; padding:6px 8px; border-radius:999px; font-size:12px; color:var(--muted); }
+    .pill b { color:var(--text); font-weight:600; }
+    .user-card { background:rgba(248,250,252,.8); border:1px solid #e2e8f0; border-radius:10px;
+      padding:12px; margin-bottom:10px; }
+    .user-head { display:flex; gap:12px; align-items:center; justify-content:space-between; flex-wrap:wrap; }
+    .user-head h3 { margin:0; font-size:15px; }
+    .kv { display:grid; grid-template-columns:140px 1fr; gap:4px 12px; margin:8px 0; font-size:13px; }
+    .muted { color:var(--muted); }
+    code.time { background:#f1f5f9; padding:2px 6px; border-radius:6px; border:1px solid #cbd5e1; }
+    pre.logs { font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      white-space:pre-wrap; word-break:break-word; background:#f1f5f9; border:1px solid #cbd5e1;
+      padding:10px; border-radius:10px; max-height:150px; overflow:auto; font-size:11px; margin:4px 0;
+      user-select:text; }
+    .token-container { grid-column: 1 / -1; margin:8px 0; }
+    .token-copy { cursor:pointer; transition:outline .15s, background .15s; }
+    .token-copy:hover { background:#e0f2fe; }
+    .ok { color:var(--good); } .warn { color:var(--warn); } .bad { color:var(--bad); }
+    .small { font-size:12px; }
+    .config-input { padding:6px; border:1px solid #cbd5e1; border-radius:6px; font-size:12px; width:200px; }
+    .config-group { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+    .config-label { font-size:12px; color:var(--muted); font-weight:500; white-space:nowrap; }
+    .global-config { background:#e6f7ff; border:1px solid #91d5ff; border-radius:8px;
+      padding:12px; margin-bottom:12px; display:flex; align-items:center; flex-wrap:wrap; gap:20px; }
+    .global-config.amber { background:#fef3c7; border-color:#fbbf24; }
+    .save-indicator { color:var(--good); font-size:12px; margin-left:10px; }
+    .top-buttons { display:flex; gap:12px; align-items:center; }
+    @keyframes fadeOut { 0%{opacity:1} 70%{opacity:1} 100%{opacity:0} }
+    .copy-success { position:fixed; bottom:20px; right:20px; background:var(--good); color:#fff;
+      padding:10px 20px; border-radius:8px; font-size:14px; z-index:1000; animation:fadeOut 2s; }
+    .copy-success.bad { background:var(--bad); }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>MegaTool <span class="accent">Dashboard</span></h1>
+    <div class="top-buttons">
+      <button class="btn btn-success" id="copyInfoBtn">📋 Copy Info (ID + JWT)</button>
+      <button class="btn btn-primary" id="exportCsvBtn">📊 Export CSV</button>
+      <button class="btn small" id="refreshAll">⟳ Refresh</button>
+      <label class="pill"><input type="checkbox" id="autoTick" style="accent-color:#22d3ee" checked /> Auto (10s)</label>
+    </div>
+  </header>
+
+  <div class="wrap">
+    <!-- Spinner config -->
+    <div class="global-config">
+      <div class="config-group">
+        <span class="config-label">🎰 Spinner ID:</span>
+        <input type="number" class="config-input" id="globalSpinnerId" min="1">
+      </div>
+      <div class="config-group">
+        <span class="config-label">📦 Pack Prize IDs:</span>
+        <input type="text" class="config-input" id="globalPackIds" style="width:340px;">
+      </div>
+      <div class="config-group">
+        <label class="pill"><input type="checkbox" id="autoFetchSpinner" checked> Auto-fetch on JWT refresh</label>
+        <span class="muted small" id="lastSpinnerFetch"></span>
+      </div>
+      <button class="btn btn-primary" id="updateGlobalConfig">💾 Save Config</button>
+      <button class="btn btn-warn" id="refreshSpinnerNow" title="Force fetch using any user JWT">🔄 Refresh Spinner Map (global)</button>
+      <span id="saveIndicator" class="save-indicator" style="display:none;">✓</span>
+    </div>
+
+    <!-- Listing config -->
+    <div class="global-config amber">
+      <div class="config-group">
+        <span class="config-label">💵 Listing delay (ms):</span>
+        <input type="number" class="config-input" id="globalListingDelay" min="100" value="2400">
+      </div>
+      <button class="btn btn-primary" id="updateListingConfig">💾 Save</button>
+      <span id="listingSaveIndicator" class="save-indicator" style="display:none;">✓</span>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <h2>Users & Schedules</h2>
+        <div class="section" id="usersPanel">Loading…</div>
+      </div>
+      <div class="card">
+        <h2>API Debug Logs</h2>
+        <div class="section">
+          <div class="row" style="margin-bottom:8px;">
+            <button class="btn small" id="refreshLogs">Refresh</button>
+            <span class="muted small">Latest <span id="logLimit"></span></span>
+          </div>
+          <pre class="logs" id="logsBox">Loading…</pre>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="copySuccessMsg" style="display:none;"></div>
+
+  <script>
+    const DEBUG_LIMIT = 100;
+    document.getElementById('logLimit').textContent = DEBUG_LIMIT;
+
+    function fmtUTC(iso) {
+      if (!iso) return '—';
+      try { const d = new Date(iso); return isNaN(d) ? '—' : d.toUTCString(); } catch { return '—'; }
+    }
+    function minsFromNow(iso) {
+      if (!iso) return '';
+      try {
+        const d = new Date(iso);
+        const diff = Math.round((d - Date.now()) / 60000);
+        return isNaN(diff) ? '' : (diff >= 0 ? `in ${diff}m` : `${-diff}m ago`);
+      } catch { return ''; }
+    }
+    function toIso(v) { if (!v) return null; try { const d = new Date(v); return isNaN(d) ? null : d.toISOString(); } catch { return null; } }
+    function showMsg(msg, bad = false) {
+      const el = document.getElementById('copySuccessMsg');
+      el.textContent = msg;
+      el.className = 'copy-success' + (bad ? ' bad' : '');
+      el.style.display = 'block';
+      setTimeout(() => { el.style.display = 'none'; }, 2400);
+    }
+    async function copyToClipboard(text) {
+      try { await navigator.clipboard.writeText(text); return true; }
+      catch {
+        const ta = document.createElement('textarea');
+        ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+        document.body.appendChild(ta); ta.select();
+        try { document.execCommand('copy'); return true; }
+        catch { return false; }
+        finally { document.body.removeChild(ta); }
+      }
+    }
+
+    async function fetchUsers() { return (await fetch('/api/users')).json(); }
+    async function fetchDebugLogs(limit) { return (await fetch(`/api/debug-logs?limit=${limit}`)).json(); }
+    async function fetchUserJwtData() { return (await fetch('/api/export/user-jwt')).json(); }
+    async function fetchFullUserData() { return (await fetch('/api/export/full-data')).json(); }
+
+    async function fetchGlobalConfig() {
+      try {
+        const cfg = await (await fetch('/api/spinner-config')).json();
+        document.getElementById('globalSpinnerId').value = cfg.spinnerId || '';
+        document.getElementById('globalPackIds').value = (cfg.packIds || []).join(', ');
+        document.getElementById('autoFetchSpinner').checked = cfg.autoFetch !== false;
+        document.getElementById('lastSpinnerFetch').textContent =
+          cfg.lastAutoFetch ? `last: ${fmtUTC(cfg.lastAutoFetch)}` : 'never';
+      } catch {}
+    }
+    async function fetchListingConfig() {
+      try {
+        const cfg = await (await fetch('/api/listing-config')).json();
+        document.getElementById('globalListingDelay').value = cfg.delayMs || 2400;
+      } catch {}
+    }
+
+    async function updateGlobalConfig() {
+      const spinnerId = document.getElementById('globalSpinnerId').value;
+      const packIds = document.getElementById('globalPackIds').value;
+      const autoFetch = document.getElementById('autoFetchSpinner').checked;
+      const ind = document.getElementById('saveIndicator');
+      ind.style.display = 'inline'; ind.textContent = '…';
+      try {
+        await fetch('/api/spinner-config', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ spinnerId, packIds, autoFetch })
+        });
+        ind.textContent = '✓'; setTimeout(() => { ind.style.display = 'none'; }, 2000);
+        await fetchGlobalConfig();
+      } catch { ind.textContent = '✗'; setTimeout(() => { ind.style.display = 'none'; }, 2000); }
+    }
+
+    async function updateListingConfig() {
+      const delayMs = document.getElementById('globalListingDelay').value;
+      const ind = document.getElementById('listingSaveIndicator');
+      ind.style.display = 'inline'; ind.textContent = '…';
+      try {
+        await fetch('/api/listing-config', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ delayMs })
+        });
+        ind.textContent = '✓'; setTimeout(() => { ind.style.display = 'none'; }, 2000);
+      } catch { ind.textContent = '✗'; setTimeout(() => { ind.style.display = 'none'; }, 2000); }
+    }
+
+    async function refreshSpinnerNow() {
+      const btn = document.getElementById('refreshSpinnerNow');
+      btn.disabled = true; const orig = btn.textContent; btn.textContent = '⏳…';
+      try {
+        const r = await fetch('/api/spinner-check', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+        const data = await r.json();
+        if (!r.ok || !data.success) throw new Error(data.error || 'failed');
+        showMsg(`✅ Spinner updated (ID=${data.config.spinnerId}, packs=[${data.config.packIds.join(',')}])`);
+        await fetchGlobalConfig();
+      } catch (e) { showMsg(`❌ ${e.message}`, true); }
+      finally { btn.disabled = false; btn.textContent = orig; }
+    }
+
+    async function copyUserJwtInfo() {
+      try {
+        const data = await fetchUserJwtData();
+        const users = Object.values(data);
+        let tsv = 'User ID\tJWT Token\n';
+        users.forEach(u => tsv += `${u.userId}\t${(u.jwtToken || '').replace(/\t/g, ' ').replace(/\n/g, ' ')}\n`);
+        await navigator.clipboard.writeText(tsv);
+        showMsg(`📋 Copied ${users.length}`);
+      } catch { showMsg('❌ copy failed', true); }
+    }
+
+    async function exportCsv() {
+      try {
+        const users = await fetchFullUserData();
+        if (!users.length) return showMsg('No data');
+        const now = new Date();
+        const pad = n => String(n).padStart(2, '0');
+        const ts = `${now.getFullYear()}${pad(now.getMonth()+1)}${pad(now.getDate())}_${pad(now.getHours())}-${pad(now.getMinutes())}`;
+        const esc = v => { const s = String(v ?? ''); return /[,"\n]/.test(s) ? `"${s.replace(/"/g,'""')}"` : s; };
+        const rows = users.map(u => [esc(u.nick), esc(u.userId), u.funds, u.coronas, esc(u.usd), esc(u.jwtToken)].join(','));
+        const csv = ['Nick,User ID,Funds,Coronas,USD,JWT', ...rows].join('\n');
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
+        a.download = `users_${ts}.csv`;
+        a.click();
+      } catch { showMsg('❌ export failed', true); }
+    }
+
+    async function action(userId, actionType) {
+      const routeMap = {
+        'refresh': 'refresh',
+        'spin': 'spin',
+        'claim': 'claim-achievements',
+        'funds': 'check-funds',
+        'scan-list': 'scan-list',
+        'spinner-check': 'spinner-check',
+        'create-bundles-cat1': 'create-bundles-cat1',
+        'create-bundles-cat73': 'create-bundles-73',
+      };
+      const route = routeMap[actionType];
+      if (!route) throw new Error('unknown action ' + actionType);
+      const r = await fetch(`/api/user/${encodeURIComponent(userId)}/${route}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}'
+      });
+      if (!r.ok) throw new Error(await r.text());
+      return r.json();
+    }
+
+    function renderUsers(users) {
+      const panel = document.getElementById('usersPanel');
+      const ids = Object.keys(users);
+      if (!ids.length) { panel.innerHTML = '<div class="muted">No users</div>'; return; }
+      const parts = [];
+      ids.sort().forEach(id => {
+        const u = users[id];
+        const startISO = toIso(u._effectiveStartUTC);
+        const endISO = toIso(u._effectiveEndUTC);
+        const jitter = u._startJitterMin ? `${u._startJitterMin}m` : '—';
+        const listerJitter = u.listerJitter != null ? `${u.listerJitter}m` : '150m';
+        const agg = u.aggression != null ? u.aggression : 0;
+        const packsOpened = u.packsOpened || 0;
+        const bundlesCreated = u.bundlesCreated || 0;
+        const creatorsDone = u.bundleCreatorsDone || 0;
+
+        parts.push(`
+          <div class="user-card">
+            <div class="user-head">
+              <h3>${u.userNick ? `${u.userNick} (${id})` : id}</h3>
+              <div class="row">
+                <button class="btn small" data-act="refresh" data-id="${id}">Refresh JWT</button>
+                <button class="btn small" data-act="spin" data-id="${id}">Spin</button>
+                <button class="btn small" data-act="claim" data-id="${id}">Claim Ach.</button>
+                <button class="btn small" data-act="funds" data-id="${id}">Funds</button>
+                <button class="btn small btn-warn" data-act="spinner-check" data-id="${id}">🎡 Check Spinner</button>
+                <button class="btn small btn-warn" data-act="scan-list" data-id="${id}">📋 Scan & List</button>
+                <button class="btn small btn-bundle" data-act="create-bundles-cat1" data-id="${id}">💼 Cat1 Bundles</button>
+                <button class="btn small btn-bundle-cat73" data-act="create-bundles-cat73" data-id="${id}">💼 Cat73 Bundles</button>
+              </div>
+            </div>
+            <div class="kv">
+              <div class="muted">Active</div>
+              <div>${u.isActive ? '<span class="ok">Yes</span>' : '<span class="bad">No</span>'}</div>
+
+              <div class="muted">Window</div>
+              <div><code class="time">${fmtUTC(startISO)}</code> <span class="pill">jitter ${jitter}</span><code class="time">${fmtUTC(endISO)}</code></div>
+
+              <div class="muted">Next Spin</div>
+              <div><code class="time">${fmtUTC(u.nextSpinTime)}</code> ${minsFromNow(u.nextSpinTime) ? `<span class="pill">${minsFromNow(u.nextSpinTime)}</span>` : ''}</div>
+
+              <div class="muted">Next Bundle Creator</div>
+              <div><code class="time">${fmtUTC(u.nextBundleCreatorTime)}</code>
+                   ${minsFromNow(u.nextBundleCreatorTime) ? `<span class="pill">${minsFromNow(u.nextBundleCreatorTime)}</span>` : ''}
+                   <span class="pill">+${listerJitter}</span></div>
+
+              <div class="muted">Aggression</div>
+              <div><span class="pill">A = ${agg}</span></div>
+
+              <div class="muted">Spins / Ach.</div>
+              <div>${u.spinCount || 0} / ${u.achievementsClaimed || 0}</div>
+
+              <div class="muted">📦 Packs Opened</div>
+              <div><span class="pill"><b>${packsOpened}</b></span></div>
+
+              <div class="muted">💼 Bundles Created</div>
+              <div><span class="pill">${bundlesCreated}</span> <span class="muted small">(${creatorsDone} creator${creatorsDone === 1 ? '' : 's'} run)</span></div>
+
+              <div class="muted">Funds</div>
+              <div>${(u.lastFunds || 0).toLocaleString()} silver / ${(u.lastCoronas || 0).toLocaleString()} coronas / ${u.lastUsd || 0} USD</div>
+
+              <div class="token-container">
+                <div class="muted small">Token <span class="muted" style="font-weight:400;">(click to copy)</span></div>
+                <pre class="logs token-copy" style="font-size:8pt;" title="Click to copy JWT">${u.jwtToken ?? 'No token'}</pre>
+              </div>
+            </div>
+          </div>`);
+      });
+      panel.innerHTML = parts.join('');
+
+      // Action buttons
+      panel.querySelectorAll('button[data-act]').forEach(btn => {
+        btn.addEventListener('click', async (e) => {
+          const el = e.currentTarget;
+          const id = el.getAttribute('data-id');
+          const act = el.getAttribute('data-act');
+          el.disabled = true;
+          const orig = el.textContent;
+          el.textContent = '…';
+          try {
+            const res = await action(id, act);
+            if (act === 'spinner-check' && res?.config) {
+              showMsg(`✅ Spinner for ${id}: ID=${res.config.spinnerId}`);
+              await fetchGlobalConfig();
+            } else if (act === 'create-bundles-cat1' && res) {
+              if (res.skipped) {
+                showMsg(`⚠️ ${id}: cat1 ${res.reason || 'skipped'}`);
+              } else {
+                showMsg(
+                  `💼 ${id} cat1: cardsListed=${res.cardsListed ?? 0}, ` +
+                  `bundlesCreated=${res.bundlesCreated ?? 0}, ` +
+                  `bundlesListed=${res.bundlesListed ?? 0}`
+                );
+              }
+            } else if (act === 'create-bundles-cat73' && res) {
+              if (res.skipped) {
+                showMsg(`⚠️ ${id}: cat73 ${res.reason || 'skipped'}`);
+              } else {
+                showMsg(
+                  `💼 ${id} cat73: cardsScanned=${res.cardsScanned ?? 0}, ` +
+                  `bundlesCreated=${res.bundlesCreated ?? 0}, ` +
+                  `bundlesListed=${res.bundlesListed ?? 0}`
+                );
+              }
+            }
+            el.style.backgroundColor = '#16a34a'; el.style.color = '#fff';
+          } catch (err) {
+            el.style.backgroundColor = '#dc2626'; el.style.color = '#fff';
+            console.error(err);
+          } finally {
+            setTimeout(() => {
+              el.style.backgroundColor = ''; el.style.color = ''; el.textContent = orig; el.disabled = false;
+            }, 800);
+            await Promise.all([loadUsers().catch(()=>{}), loadLogs().catch(()=>{})]);
+          }
+        });
+      });
+
+      // Click-to-copy JWT
+      panel.querySelectorAll('.token-copy').forEach(pre => {
+        pre.addEventListener('click', async () => {
+          const sel = window.getSelection();
+          if (sel && sel.toString().length > 0) return;
+          const text = pre.textContent.trim();
+          if (!text || text === 'No token') return;
+          const ok = await copyToClipboard(text);
+          if (ok) {
+            showMsg('📋 JWT copied');
+            pre.style.outline = '2px solid #16a34a';
+            setTimeout(() => { pre.style.outline = ''; }, 900);
+          } else {
+            showMsg('❌ copy failed', true);
+          }
+        });
+      });
+    }
+
+    function renderLogs(list) {
+      const box = document.getElementById('logsBox');
+      if (!Array.isArray(list) || !list.length) { box.textContent = 'No logs'; return; }
+      box.textContent = list.map(e => {
+        const ts = e.timestamp || '', who = e.userId || 'system', act = e.action || '';
+        const m = e.request?.method || '', u = e.request?.url || '';
+        if (e.response) return `[${ts}] [${who}] ${act} ${m} ${u} -> ${e.response.status}`;
+        if (e.error) return `[${ts}] [${who}] ${act} ${m} ${u} -> ERR ${e.error.status || ''} ${e.error.message}`;
+        return `[${ts}] [${who}] ${act} ${m} ${u}`;
+      }).join('\n');
+    }
+
+    async function loadUsers() { try { renderUsers(await fetchUsers()); } catch (e) { document.getElementById('usersPanel').innerHTML = `<span class="bad">${e.message}</span>`; } }
+    async function loadLogs()  { try { renderLogs(await fetchDebugLogs(DEBUG_LIMIT)); } catch (e) { document.getElementById('logsBox').textContent = e.message; } }
+
+    document.getElementById('refreshAll').addEventListener('click', () => {
+      loadUsers(); loadLogs(); fetchGlobalConfig(); fetchListingConfig();
+    });
+    document.getElementById('refreshLogs').addEventListener('click', loadLogs);
+    document.getElementById('updateGlobalConfig').addEventListener('click', updateGlobalConfig);
+    document.getElementById('updateListingConfig').addEventListener('click', updateListingConfig);
+    document.getElementById('refreshSpinnerNow').addEventListener('click', refreshSpinnerNow);
+    document.getElementById('copyInfoBtn').addEventListener('click', copyUserJwtInfo);
+    document.getElementById('exportCsvBtn').addEventListener('click', exportCsv);
+
+    let tickHandle = setInterval(() => { loadUsers(); loadLogs(); }, 10000);
+    document.getElementById('autoTick').addEventListener('change', e => {
+      if (e.target.checked) tickHandle = setInterval(() => { loadUsers(); loadLogs(); }, 10000);
+      else clearInterval(tickHandle);
+    });
+
+    fetchGlobalConfig(); fetchListingConfig(); loadUsers(); loadLogs();
+  </script>
+</body>
+</html>
